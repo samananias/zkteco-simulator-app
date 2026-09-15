@@ -4,8 +4,9 @@ A software simulator of a ZKTeco standalone biometric attendance terminal. It sp
 
 > **Status: Phase 0 — repository established, implementation not started.**
 > The plan, protocol research, feasibility analysis and architecture live in the companion
-> documentation repository: `../docs/simulator-docs/README.md`.
-> Development starts at **Phase 1 (protocol core)** per `docs/simulator-docs/plan/roadmap.md`.
+> documentation repository: **[samananias/zkteco-simulator-docs](https://github.com/samananias/zkteco-simulator-docs)**
+> (start at `simulator-docs/README.md`).
+> Development starts at **Phase 1 (protocol core)** per its `plan/roadmap.md`.
 
 ## Why a simulator?
 
@@ -44,7 +45,8 @@ Point the backend at it with `ZK_HOST=127.0.0.1` (or the LAN IP) — no backend 
 
 ## Documentation
 
-All "how and why" knowledge lives in the separate `docs` repository (`docs/simulator-docs/`):
+All "how and why" knowledge lives in the separate documentation repository
+**[samananias/zkteco-simulator-docs](https://github.com/samananias/zkteco-simulator-docs)**:
 requirements → research → architecture → decisions → plans → operations → status.
 This README intentionally stays thin; do not copy documentation here.
 
