@@ -1,0 +1,25 @@
+{
+  "name": "zkteco-simulator-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Software simulator of a ZKTeco standalone biometric attendance terminal (binary protocol on TCP :4370 + device-face web UI).",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "node --import tsx --test test/unit/*.test.ts test/integration/*.test.ts",
+    "test:unit": "node --import tsx --test test/unit/*.test.ts",
+    "punch": "node scripts/punch.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "node-zklib": "1.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

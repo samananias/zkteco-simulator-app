@@ -1,0 +1,22 @@
+# dependencies / build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# runtime data
+data/
+*.sqlite
+*.sqlite-journal
+
+# env & logs
+.env
+.env.*
+*.log
+npm-debug.log*
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
