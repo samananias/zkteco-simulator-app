@@ -7,12 +7,18 @@ A software simulator of a ZKTeco standalone biometric attendance terminal. It sp
 > documentation repository: **[samananias/zkteco-simulator-docs](https://github.com/samananias/zkteco-simulator-docs)**
 > (start at `simulator-docs/README.md`).
 > Development starts at **Phase 1 (protocol core)** per its `plan/roadmap.md`.
+>
+> **Planned scope extension (Phases 6–8):** real fingerprint enrollment and matching — camera
+> capture first (zero hardware), USB-OTG scanner later — with the ZK protocol surface frozen so
+> the backend and base demo never depend on it. Two items are permanently out of scope, with
+> reasons documented: phone built-in/in-display sensor capture (platform isolation) and template
+> interop with real ZKTeco firmware (proprietary formats).
 
 ## Why a simulator?
 
 We built an attendance/HR system that talks to a physical ZKTeco terminal over the network. Without the hardware, the system can't be demonstrated — so we reimplemented the device's wire protocol from the packet format up, byte-for-byte, well enough that our production backend can't tell the difference. That's the project: protocol-level engineering, plus a visual device replica for the demo.
 
-**Honest scope:** no real biometric capture happens — a "scan" is a triggered event that produces exactly the data a real scan would. Everything else (session handshake, command handling, record layouts, realtime events) is protocol-faithful.
+**Honest scope:** in v1 no real biometric capture happens — a "scan" is a triggered event that produces exactly the data a real scan would. Everything else (session handshake, command handling, record layouts, realtime events) is protocol-faithful. **From Phase 6 the punch becomes genuinely matched** (real ISO 19794-2 templates + an out-of-process matcher), while the wire protocol stays byte-identical; what still never happens is parity with a capacitive sensor or template interop with ZKTeco firmware — see the docs repo's `status/known-limitations.md`.
 
 ## Planned layout (Phase 1+)
 
@@ -22,6 +28,8 @@ src/
 ├── config.ts           env/CLI configuration
 ├── protocol/           frame codec, checksum, session, command handlers, record codecs, time codec
 ├── device/             DeviceStore (in-memory | sqlite), event bus, seed data
+├── biometric/          (Phase 6) enrollment, identify/verify, encrypted store, matcher client
+├── capture/            (Phase 6–7) CaptureStation adapters: camera-pwa, otg-scanner, import, fixture
 ├── transport/          net.Server TCP transport (:4370)
 ├── web/                static UI serving, REST API, WebSocket
 public/                 device-face UI (bezel kiosk replica)

@@ -8,6 +8,12 @@ data/
 *.sqlite
 *.sqlite-journal
 
+# biometric data — real templates/keys must NEVER be committed (ADR-011)
+data/biometric/
+*.bio
+*.key
+!/*.example.key
+
 # env & logs
 .env
 .env.*
