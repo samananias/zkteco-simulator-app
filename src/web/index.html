@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZKTeco Simulator — Device Face</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="device">
+  <div class="brand-row"><span class="brand">ZKTECO</span><span class="watermark">SIMULATOR</span></div>
+
+  <div class="screen">
+    <div class="statusbar">
+      <span class="glyph" id="glyph-net">▂▄▆</span>
+      <span class="glyph" id="glyph-alarm">✱</span>
+      <span class="glyph" id="glyph-lock">🔒</span>
+    </div>
+
+    <div class="clock" id="clock">--:--:--</div>
+    <div class="date" id="date">----‑--‑--</div>
+    <div class="devname" id="devname">…</div>
+
+    <div class="prompt" id="prompt">Please place finger</div>
+
+    <div class="lcd" id="lcd" hidden></div>
+
+    <div class="banner" id="banner" hidden>Device disabled by admin</div>
+
+    <div class="menu" id="menu" hidden>
+      <div class="tile">👥<span>User Mgmt</span></div>
+      <div class="tile">📅<span>Att Search</span></div>
+      <div class="tile">🗂<span>Data Mgmt</span></div>
+      <div class="tile">⚙️<span>System</span></div>
+    </div>
+
+    <div class="verify pass" id="verify-pass" hidden>
+      <div class="mark">✔</div>
+      <div class="who" id="pass-name">—</div>
+      <div class="msg">Thank you!</div>
+    </div>
+    <div class="verify fail" id="verify-fail" hidden>
+      <div class="mark">✘</div>
+      <div class="who" id="fail-who">Unknown</div>
+      <div class="msg">Please try again</div>
+    </div>
+  </div>
+
+  <div class="keypad">
+    <button class="key num" data-digit="1">1</button>
+    <button class="key num" data-digit="2">2</button>
+    <button class="key num" data-digit="3">3</button>
+    <button class="key fn" data-fn="menu">MENU</button>
+    <button class="key num" data-digit="4">4</button>
+    <button class="key num" data-digit="5">5</button>
+    <button class="key num" data-digit="6">6</button>
+    <button class="key fn" data-fn="esc">ESC</button>
+    <button class="key num" data-digit="7">7</button>
+    <button class="key num" data-digit="8">8</button>
+    <button class="key num" data-digit="9">9</button>
+    <button class="key fn" data-fn="ok">OK</button>
+    <button class="key num" data-digit="0" id="key-scan">SCAN</button>
+  </div>
+
+  <div class="grille" aria-hidden="true"></div>
+</div>
+
+<div class="log" id="log"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

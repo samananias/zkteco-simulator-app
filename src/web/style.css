@@ -1,0 +1,204 @@
+/* Device face — kiosk/hardware aesthetic (docs/simulator-docs/architecture/web-ui.md).
+   Deliberately NOT a SaaS dashboard: bezel, segmented digits, square tiles, no glassmorphism. */
+
+:root {
+  --bezel: #1b1e24;
+  --bezel-edge: #2a2f38;
+  --screen: #050a18;
+  --text: #e8f2ff;
+  --accent: #38d3ff;
+  --pass: #23d18b;
+  --fail: #ff4d5e;
+  --key: #232833;
+  --key-text: #cdd6e4;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 28px 12px;
+  background: radial-gradient(1200px 700px at 50% -10%, #22262e 0%, #121419 60%, #0b0d11 100%);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: var(--text);
+}
+
+.device {
+  width: 380px;
+  padding: 14px 16px 12px;
+  border-radius: 26px;
+  background: linear-gradient(160deg, var(--bezel-edge) 0%, var(--bezel) 40%, #14171c 100%);
+  box-shadow: 0 24px 60px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.08);
+  border: 1px solid #000;
+}
+
+.brand-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 4px 8px;
+}
+
+.brand { font-weight: 700; letter-spacing: 4px; font-size: 12px; color: #9fb0c8; }
+
+.watermark {
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: #6b7686;
+  border: 1px solid #3a4150;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.screen {
+  position: relative;
+  height: 380px;
+  border-radius: 10px;
+  background: var(--screen);
+  border: 2px solid #000;
+  box-shadow: inset 0 0 24px rgba(20,120,190,.15);
+  padding: 10px 12px;
+  overflow: hidden;
+}
+
+.statusbar { display: flex; justify-content: flex-end; gap: 8px; font-size: 11px; color: #8fa3bd; }
+.statusbar.off { opacity: .25; }
+
+.clock {
+  margin-top: 26px;
+  text-align: center;
+  font-size: 58px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  text-shadow: 0 0 18px rgba(56,211,255,.35);
+}
+
+.date { text-align: center; font-size: 14px; color: #9fb6d4; margin-top: 2px; letter-spacing: 1px; }
+
+.devname { text-align: center; font-size: 15px; color: var(--text); margin-top: 18px; font-weight: 600; }
+
+.prompt {
+  text-align: center;
+  font-size: 13px;
+  color: #7f95b2;
+  margin-top: 26px;
+  min-height: 18px;
+}
+
+.lcd {
+  margin-top: 12px;
+  font-family: "Consolas", monospace;
+  font-size: 13px;
+  color: #ffd66b;
+  background: rgba(255, 214, 107, .06);
+  border: 1px solid rgba(255,214,107,.25);
+  border-radius: 4px;
+  padding: 6px 8px;
+  white-space: pre-line;
+  min-height: 34px;
+}
+
+.banner {
+  margin-top: 14px;
+  text-align: center;
+  font-size: 12px;
+  color: #ffb020;
+  border: 1px dashed #ffb02055;
+  border-radius: 4px;
+  padding: 6px;
+}
+
+.menu {
+  position: absolute;
+  inset: 42px 12px 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  background: var(--screen);
+}
+
+.tile {
+  border: 1px solid #2c3a4e;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #b9c8dc;
+  background: #0a1224;
+}
+
+.tile span { font-size: 11px; color: #7f95b2; }
+
+.verify {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.verify.pass { background: rgba(9, 46, 30, .96); color: var(--pass); }
+.verify.fail { background: rgba(64, 10, 16, .96); color: var(--fail); }
+.verify .mark { font-size: 64px; line-height: 1; }
+.verify .who { font-size: 20px; font-weight: 700; color: #fff; }
+.verify .msg { font-size: 14px; }
+
+.keypad {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 12px 2px 4px;
+}
+
+.key {
+  height: 40px;
+  border-radius: 8px;
+  border: 1px solid #000;
+  background: linear-gradient(180deg, var(--key) 0%, #1a1e26 100%);
+  color: var(--key-text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 2px 3px rgba(0,0,0,.5);
+}
+
+.key:active { transform: translateY(1px); filter: brightness(1.2); }
+
+.key.fn { font-size: 10px; letter-spacing: 1px; color: #8fa3bd; }
+
+.grille {
+  height: 22px;
+  margin-top: 6px;
+  border-radius: 6px;
+  background: repeating-linear-gradient(90deg, #14171c 0 6px, #1d2129 6px 8px);
+}
+
+.log {
+  width: 380px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family: "Consolas", monospace;
+  font-size: 11px;
+  color: #7f95b2;
+  background: #0d1015;
+  border: 1px solid #232833;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.log div { padding: 1px 0; border-bottom: 1px dotted #1d2129; }
+.log .pass { color: var(--pass); }
+.log .fail { color: var(--fail); }
+.log .info { color: #8fa3bd; }
