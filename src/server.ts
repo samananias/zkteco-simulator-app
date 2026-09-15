@@ -15,6 +15,10 @@ import { EventBus } from './core/events.js';
 import { DeviceState } from './core/device.js';
 import { ProtocolEngine } from './core/engine.js';
 import { HttpServer } from './core/http.js';
+import { generateSessionKey, loadBiometricKey } from './biometric/crypto.js';
+import { EncryptedBiometricStore } from './biometric/store.js';
+import { MatcherClient } from './biometric/matcher.js';
+import { BiometricService } from './biometric/service.js';
 
 export interface SimulatorHandle {
   stop(): Promise<void>;
@@ -56,12 +60,34 @@ export async function startSimulator(config: Config, logger: Logger = createLogg
   const engine = new ProtocolEngine({ config, store, device, bus, logger });
   await engine.start();
 
+  // Biometric subsystem (Phase 6, ADR-010/011) — optional at boot (NFR-12).
+  let biometric: BiometricService | undefined;
+  if (config.matcherUrl) {
+    const matcher = new MatcherClient(config.matcherUrl, logger);
+    const key = config.biometricKey
+      ? loadBiometricKey(config.biometricKey)
+      : generateSessionKey();
+    if (key.source === 'session') {
+      logger.warn(
+        'ZK_BIOMETRIC_KEY not set — using a process-session key; enrolled templates become unreadable after restart (ADR-011). Set the key for persistence.',
+      );
+    }
+    const bio = new EncryptedBiometricStore(config.biometricDataDir, key);
+    await bio.init();
+    biometric = new BiometricService({ config, store, bio, matcher, logger });
+    await biometric.reconcile();
+    logger.info('biometric subsystem enabled', { matcher: config.matcherUrl, dataDir: config.biometricDataDir });
+  } else {
+    logger.info('biometric subsystem disabled (NFR-12) — set ZK_MATCHER_URL to enable');
+  }
+
   const http = new HttpServer({
     config,
     store,
     device,
     bus,
     logger,
+    biometric,
     reset: async () => {
       await store.clearAttendance();
       for (const t of await store.getTemplates()) await store.deleteTemplate(t.uid, t.finger);

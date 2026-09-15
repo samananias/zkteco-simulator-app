@@ -52,7 +52,11 @@ test.after(async () => {
     /* device may close first */
   }
   await sim?.stop();
-  rmSync(dir, { recursive: true, force: true });
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* Windows can hold the sqlite handle briefly after close — the temp dir is throwaway */
+  }
 });
 
 test('sqlite store: oracle reads seeded users and attendance', async () => {

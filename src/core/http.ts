@@ -14,6 +14,9 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import type { Store } from '../store/types.js';
+import type { BiometricService } from '../biometric/service.js';
+import { BiometricServiceError } from '../biometric/service.js';
+import { MatcherUnavailableError } from '../biometric/matcher.js';
 import type { DeviceState } from './device.js';
 import type { EventBus } from './events.js';
 import type { AttendanceRecord } from '../protocol/records.js';
@@ -24,6 +27,8 @@ export interface HttpOptions {
   device: DeviceState;
   bus: EventBus;
   logger: Logger;
+  /** Phase 6+ biometric core — present only when ZK_MATCHER_URL is configured (NFR-12) */
+  biometric?: BiometricService | undefined;
   /** restore the seed state (POST /api/reset) */
   reset(): Promise<void>;
 }
@@ -122,6 +127,9 @@ export class HttpServer {
         await this.deps.reset();
         return await this.json(res, { ok: true });
       }
+      if (url.pathname.startsWith('/api/biometric/')) {
+        return await this.biometricRoute(req, res, url.pathname);
+      }
       if (req.method === 'GET') return await this.serveStatic(res, url.pathname);
       res.writeHead(405).end();
     } catch (err) {
@@ -162,6 +170,88 @@ export class HttpServer {
     this.deps.bus.emit('verify', { result: 'pass', user, userId: user.userId, verifyType, at });
     this.deps.logger.info('punch accepted', { userId: user.userId, name: user.name, state });
     await this.json(res, { result: 'pass', record: serializeRecord(record) });
+  }
+
+  // ------------------------------------------------ biometric REST v2 (Phase 6)
+  //
+  // The open REST surface any system can integrate with (FR-14…FR-18). Template
+  // bytes ride request/response bodies only — they are never logged or echoed
+  // in errors (ADR-011 §3). All decision endpoints answer 200 with a decision;
+  // infrastructure problems answer 503 (NFR-12: never auto-accept).
+
+  private async biometricRoute(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<void> {
+    const svc = this.deps.biometric;
+    if (pathname === '/api/biometric/status' && req.method === 'GET') {
+      if (!svc) return await this.json(res, { enabled: false, matcherUp: false, enrolled: 0 });
+      return await this.json(res, await svc.status());
+    }
+    if (!svc) {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'biometric features disabled — set ZK_MATCHER_URL (NFR-12)' }));
+      return;
+    }
+    try {
+      if (pathname === '/api/biometric/enroll' && req.method === 'POST') {
+        const body = await readJson<{
+          userId?: string;
+          finger?: number;
+          templateB64?: string;
+          quality?: number;
+          source?: 'camera' | 'usb-otg' | 'pc-scanner' | 'imported';
+          consent?: boolean;
+        }>(req);
+        const template = body.templateB64 ? Buffer.from(body.templateB64, 'base64') : Buffer.alloc(0);
+        const result = await svc.enroll({
+          userId: String(body.userId ?? ''),
+          finger: Number(body.finger),
+          template,
+          consent: body.consent === true,
+          quality: body.quality,
+          source: body.source,
+        });
+        return await this.json(res, { ok: true, ...result });
+      }
+      if (pathname === '/api/biometric/identify' && req.method === 'POST') {
+        const body = await readJson<{ templateB64?: string }>(req);
+        const template = body.templateB64 ? Buffer.from(body.templateB64, 'base64') : Buffer.alloc(0);
+        return await this.json(res, await svc.identify(template));
+      }
+      if (pathname === '/api/biometric/verify' && req.method === 'POST') {
+        const body = await readJson<{ userId?: string; finger?: number; templateB64?: string }>(req);
+        const template = body.templateB64 ? Buffer.from(body.templateB64, 'base64') : Buffer.alloc(0);
+        return await this.json(res, await svc.verify(String(body.userId ?? ''), Number(body.finger), template));
+      }
+      if (pathname === '/api/biometric/remove' && req.method === 'POST') {
+        const body = await readJson<{ userId?: string; finger?: number }>(req);
+        const removed = await svc.removeEnrollment(String(body.userId ?? ''), Number(body.finger));
+        return await this.json(res, { ok: removed });
+      }
+      if (pathname === '/api/biometric/purge' && req.method === 'POST') {
+        const body = await readJson<{ confirm?: boolean }>(req);
+        if (body.confirm !== true) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'purge requires { confirm: true }' }));
+          return;
+        }
+        return await this.json(res, { ok: true, purged: await svc.purge() });
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+    } catch (err) {
+      if (err instanceof BiometricServiceError) {
+        res.writeHead(err.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+        return;
+      }
+      if (err instanceof MatcherUnavailableError) {
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'matcher sidecar unavailable' }));
+        return;
+      }
+      this.deps.logger.warn('biometric http error', { path: pathname, err: String(err) });
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'bad request' }));
+    }
   }
 
   private stateBody(): Record<string, unknown> {

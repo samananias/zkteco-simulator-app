@@ -29,8 +29,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Matcher sidecar (ADR-010) — SourceAFIS 3.18 behind a tiny raw-body HTTP API.
  *
- * Run (Java 11+ single-file source launcher):
- *   java -cp sidecar/lib/sourceafis-3.18.0.jar sidecar/MatcherSidecar.java [port]
+ * Run (JDK 17+ single-file source launcher; compiles in memory on start):
+ *   java -cp "sidecar/lib/*" sidecar/MatcherSidecar.java [port]
  *
  * All template/image payloads cross as raw request bodies; parameters ride the
  * query string — no JSON parsing is needed inside the sidecar. Responses are
