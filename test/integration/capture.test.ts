@@ -11,7 +11,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -245,5 +245,147 @@ test('camera-station pages are served (/enroll, /scan)', async (t) => {
   // the device-face menu links the stations
   const index = await (await fetch(`http://127.0.0.1:${HTTP_PORT}/`)).text();
   assert.ok(index.includes('href="/scan"') && index.includes('href="/enroll"'));
+  assert.ok(index.includes('href="/biometric"'), 'the menu links the admin view');
+});
+
+// ------------------------------------------------------------------ Phase 8
+
+test('consent statement is served with a version and hash (ADR-011 §4)', async (t) => {
+  if (!sim) return t.skip('JDK 17+ not available');
+  const { status, json } = await api('/api/biometric/consent');
+  assert.equal(status, 200);
+  assert.equal(json.version, 'v1');
+  assert.equal(json.purpose, 'attendance-identification');
+  assert.ok(String(json.text).includes('attendance identification only'), 'the statement states the purpose');
+  assert.equal(String(json.hash).length, 64, 'a sha-256 hash links records to the exact wording');
+});
+
+test('a stale consent version is refused (409) and stores nothing', async (t) => {
+  if (!sim) return t.skip('JDK 17+ not available');
+  const before = await api('/api/biometric/status');
+  const res = await api('/api/biometric/enroll', {
+    userId: '1003',
+    finger: 2,
+    consent: true,
+    consentVersion: 'v0',
+    samples: [await synth(5, 0), await synth(5, 2, 1, 10), await synth(5, -2, 2, 10)],
+  });
+  assert.equal(res.status, 409);
+  assert.ok(String(res.json.error).includes('outdated'), `error=${res.json.error}`);
+  const after = await api('/api/biometric/status');
+  assert.equal(after.json.enrolled, before.json.enrolled, 'nothing stored for a stale statement');
+});
+
+test('rosters carry metadata only; station attribution is recorded (multi-station)', async (t) => {
+  if (!sim) return t.skip('JDK 17+ not available');
+  const sample = await synth(9, 0);
+  const enroll = await api('/api/biometric/enroll', {
+    userId: '1004',
+    finger: 0,
+    consent: true,
+    consentVersion: 'v1',
+    station: 'camera-9',
+    samples: [sample, await synth(9, 2, 1, 10), await synth(9, -2, 2, 10)],
+  });
+  assert.equal(enroll.status, 200);
+
+  const roster = await api('/api/biometric/enrollments');
+  assert.equal(roster.status, 200);
+  const rows = roster.json.enrollments as Record<string, unknown>[];
+  const mine = rows.find((r) => r.userId === '1004');
+  assert.ok(mine, 'the new enrollment is listed');
+  assert.equal(mine.station, 'camera-9');
+  assert.equal(mine.name, 'Bautista, Dan');
+  assert.equal(mine.finger, 0);
+  assert.equal(mine.source, 'camera');
+  const raw = JSON.stringify(rows);
+  assert.ok(!raw.includes(sample), 'no template bytes in the enrollment roster');
+  assert.ok(!/template/i.test(raw), 'no template field in the enrollment roster');
+
+  const consents = await api('/api/biometric/consents');
+  const c = (consents.json.consents as Record<string, unknown>[]).find((r) => r.userId === '1004');
+  assert.ok(c, 'consent record written on enrollment');
+  assert.equal(c.statementVersion, 'v1');
+  assert.equal(c.station, 'camera-9');
+  assert.equal(c.method, 'camera');
+  assert.equal(c.uid, mine.uid);
+  assert.ok(!c.withdrawnAt, 'consent is active');
+  assert.ok(!JSON.stringify(consents.json).includes(sample), 'no template bytes in the consent roster');
+});
+
+test('concurrent probes through one matcher both land (multi-station safety)', async (t) => {
+  if (!sim) return t.skip('JDK 17+ not available');
+  const before = (await api('/api/attendance')).json.attendance as unknown[];
+  const probe = await synth(1, 3, 1, 10);
+  const [a, b] = await Promise.all([
+    api('/api/biometric/punch', { templateB64: probe, station: 'scan-a' }),
+    api('/api/biometric/punch', { templateB64: probe, station: 'scan-b' }),
+  ]);
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  assert.equal(a.json.result, 'pass');
+  assert.equal(b.json.result, 'pass');
+  assert.equal((a.json.record as Record<string, unknown>).deviceUserId, '1001');
+  assert.equal((b.json.record as Record<string, unknown>).deviceUserId, '1001');
+  const after = (await api('/api/attendance')).json.attendance as unknown[];
+  assert.equal(after.length, before.length + 2, 'both punches recorded — none lost or merged');
+});
+
+test('withdrawal deletes every template and marks consent withdrawn (ADR-011 §5)', async (t) => {
+  if (!sim) return t.skip('JDK 17+ not available');
+  const before = await api('/api/biometric/status');
+  const missing = await api('/api/biometric/withdraw', { userId: '9999' });
+  assert.equal(missing.status, 404, 'unknown employee');
+
+  const w = await api('/api/biometric/withdraw', { userId: '1004', reason: 'unit-test' });
+  assert.equal(w.status, 200);
+  assert.equal(w.json.removed, 1);
+  assert.equal(w.json.consentOnFile, true);
+
+  const after = await api('/api/biometric/status');
+  assert.equal(after.json.enrolled, (before.json.enrolled as number) - 1, 'template count dropped');
+
+  const consents = (await api('/api/biometric/consents')).json.consents as Record<string, unknown>[];
+  const rec = consents.find((r) => r.userId === '1004');
+  assert.ok(rec, 'the withdrawn record is kept as accountability evidence');
+  assert.ok(rec?.withdrawnAt, 'consent marked withdrawn');
+  assert.equal(rec?.withdrawReason, 'unit-test');
+
+  const files = readdirSync(path.join(bioDir, 'data')).filter((f) => f.endsWith('.bio'));
+  assert.equal(files.length, after.json.enrolled as number, 'one .bio file per remaining enrollment');
+
+  const probe = await api('/api/biometric/identify', { templateB64: await synth(9, 3, 1, 10) });
+  assert.notEqual(probe.json.userId, '1004', 'a withdrawn finger no longer identifies');
+});
+
+test('biometric admin page is served and never handles template bytes (ADR-011 §3)', async (t) => {
+  if (!sim) return t.skip('JDK 17+ not available');
+  const page = await fetch(`http://127.0.0.1:${HTTP_PORT}/biometric`);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.ok(html.includes('Consent records') && html.includes('PURGE'), 'admin view sections present');
+  const js = await (await fetch(`http://127.0.0.1:${HTTP_PORT}/biometric.js`)).text();
+  assert.ok(!js.includes('templateB64'), 'the admin view never fetches template bytes');
+  assert.ok(!/base64/i.test(js), 'no base64 handling in the admin view');
+});
+
+test('purge leaves no ciphertext, no consent record and no wire copy (ADR-011 §5)', async (t) => {
+  if (!sim) return t.skip('JDK 17+ not available');
+  const refused = await api('/api/biometric/purge', {});
+  assert.equal(refused.status, 400, 'explicit confirmation is required');
+
+  const purge = await api('/api/biometric/purge', { confirm: true });
+  assert.equal(purge.status, 200);
+  assert.ok((purge.json.purged as number) >= 1);
+
+  const status = await api('/api/biometric/status');
+  assert.equal(status.json.enrolled, 0);
+  assert.equal(status.json.consents, 0);
+  assert.equal(status.json.matcherTemplates, 0);
+  assert.equal(readdirSync(path.join(bioDir, 'data')).filter((f) => f.endsWith('.bio')).length, 0, 'no ciphertext survives');
+  assert.equal(readdirSync(path.join(bioDir, 'data', 'consent')).length, 0, 'no consent record survives');
+
+  const att = (await api('/api/attendance')).json.attendance as unknown[];
+  assert.ok(att.length > 0, 'attendance records are the device log, untouched by a biometric purge');
 });
 

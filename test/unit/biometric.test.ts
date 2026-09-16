@@ -12,6 +12,7 @@ import path from 'node:path';
 import { loadConfig } from '../../src/config.js';
 import { BiometricKeyError, decrypt, encrypt, generateSessionKey, loadBiometricKey } from '../../src/biometric/crypto.js';
 import { EncryptedBiometricStore } from '../../src/biometric/store.js';
+import { ConsentLedger } from '../../src/biometric/consent.js';
 import { BiometricService, BiometricServiceError, type EnrollInput } from '../../src/biometric/service.js';
 import type { MatcherClient, MatchCandidate } from '../../src/biometric/matcher.js';
 import { MemoryStore } from '../../src/store/memory.js';
@@ -128,10 +129,11 @@ function stubMatcher(state: StubState): MatcherClient {
   } as unknown as MatcherClient;
 }
 
-async function newService(matchThreshold?: number, matchSeparation?: number): Promise<{
+async function newService(matchThreshold?: number, matchSeparation?: number, flagsExtra: string[] = []): Promise<{
   service: BiometricService;
   store: Store;
   state: StubState;
+  consents: ConsentLedger;
 }> {
   const store = new MemoryStore();
   await store.init();
@@ -141,17 +143,20 @@ async function newService(matchThreshold?: number, matchSeparation?: number): Pr
   ];
   for (const u of users) await store.upsertUser(u);
   const state: StubState = { identify: [], verifyScores: new Map(), enrolled: [] };
-  const flags = ['--zk-log-level', 'silent'];
+  const flags = ['--zk-log-level', 'silent', ...flagsExtra];
   if (matchThreshold !== undefined) flags.push('--zk-match-threshold', String(matchThreshold));
   if (matchSeparation !== undefined) flags.push('--zk-match-separation', String(matchSeparation));
+  const consents = new ConsentLedger(path.join(mkdtempSync(path.join(tmpdir(), 'zksim-consent-svc-')), 'consent'));
+  await consents.init();
   const service = new BiometricService({
     config: loadConfig(flags),
     store,
     bio: new EncryptedBiometricStore(mkdtempSync(path.join(tmpdir(), 'zksim-bio-svc-')), KEY),
+    consent: consents,
     matcher: stubMatcher(state),
     logger: { error() {}, warn() {}, info() {}, debug() {}, isDebug: false },
   });
-  return { service, store, state };
+  return { service, store, state, consents };
 }
 
 const ENROLL: EnrollInput = {
@@ -284,4 +289,122 @@ test('ceremony: consistent samples → enrolled with all pairs recorded', async 
   assert.deepEqual(r.consistency, [500, 500, 500]);
   assert.ok(await store.getTemplate(1, 0), 'wire copy stored');
   assert.ok(state.enrolled.includes('1:0'), 'matcher copy enrolled');
+});
+
+// ---------------------------------------------------------------- Phase 8
+
+test('service.enroll: records versioned consent and rejects a stale statement', async () => {
+  const { service, consents } = await newService();
+  await assert.rejects(
+    () => service.enroll({ ...ENROLL, consentVersion: 'v0' }),
+    (e: BiometricServiceError) => e.status === 409 && /outdated/.test(e.message),
+  );
+  assert.deepEqual(await consents.list(), [], 'a stale statement stores no consent record');
+
+  const statement = service.consentStatement();
+  assert.equal(statement.version, 'v1');
+  assert.equal(statement.purpose, 'attendance-identification');
+  assert.equal(statement.hash.length, 64);
+
+  await service.enroll({ ...ENROLL, consentVersion: 'v1', station: 'camera-7' });
+  const rec = await consents.get('1001');
+  assert.equal(rec?.statementVersion, 'v1');
+  assert.equal(rec?.statementHash, statement.hash, 'the record pins the exact wording');
+  assert.equal(rec?.purpose, statement.purpose);
+  assert.equal(rec?.method, 'imported', 'method follows the template source');
+  assert.equal(rec?.station, 'camera-7', 'explicit station attribution wins');
+  assert.ok(rec?.at, 'timestamped');
+  assert.equal(rec?.withdrawnAt, undefined);
+});
+
+test('service.enroll: station falls back to the configured ZK_STATION_ID', async () => {
+  const { service, consents } = await newService(undefined, undefined, ['--zk-station-id', 'camera-2']);
+  const r = await service.enroll({ ...ENROLL, consentVersion: 'v1' });
+  assert.equal(r.uid, 1);
+  assert.equal((await consents.get('1001'))?.station, 'camera-2');
+});
+
+test('service.enrollments: metadata only — no template bytes, ever', async () => {
+  const { service } = await newService();
+  const template = T('ISO-TEMPLATE-1001-F0');
+  await service.enroll({ ...ENROLL, template, quality: 77, source: 'camera' });
+  const rows = await service.enrollments();
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0], {
+    uid: 1,
+    userId: '1001',
+    name: 'Ana',
+    finger: 0,
+    format: 'iso19794-2',
+    source: 'camera',
+    station: 'camera-1',
+    quality: 77,
+    createdAt: rows[0]?.createdAt,
+  });
+  const raw = JSON.stringify(rows);
+  assert.ok(!raw.includes(template.toString('base64')), 'no template bytes in the roster');
+  assert.ok(!/template/i.test(raw), 'no template field in the roster');
+  assert.ok(rows[0]?.createdAt, 'enrollment timestamp present');
+});
+
+test('service.withdraw: clears all three stores and marks consent withdrawn', async () => {
+  const { service, store, state, consents } = await newService();
+  await service.enroll(ENROLL);
+  await service.enroll({ ...ENROLL, finger: 1 });
+  assert.equal(state.enrolled.length, 2);
+
+  const out = await service.withdrawEmployee('1001', 'employee request');
+  assert.equal(out.removed, 2);
+  assert.equal(out.consentOnFile, true);
+
+  assert.deepEqual(state.enrolled, [], 'matcher candidates removed');
+  assert.equal(await store.getTemplate(1, 0), undefined, 'FR-8 wire copy removed');
+  assert.equal(await store.getTemplate(1, 1), undefined);
+  assert.deepEqual(await service.enrollments(), [], 'no enrollment left');
+  const rec = await consents.get('1001');
+  assert.equal(rec?.withdrawReason, 'employee request');
+  assert.ok(rec?.withdrawnAt, 'consent marked withdrawn, evidence preserved');
+
+  // idempotent
+  const again = await service.withdrawEmployee('1001');
+  assert.equal(again.removed, 0);
+  await assert.rejects(
+    () => service.withdrawEmployee('9999'),
+    (e: BiometricServiceError) => e.status === 404,
+  );
+});
+
+test('service.retentionSweep: 0 days is the ADR-011 rule and removes nothing', async () => {
+  const { service, consents } = await newService();
+  await service.enroll(ENROLL);
+  const sweep = await service.retentionSweep(new Date(Date.now() + 365 * 86_400_000));
+  assert.equal(sweep.removed, 0, 'default keeps templates while the employee record exists');
+  assert.equal((await service.enrollments()).length, 1);
+  assert.equal((await consents.get('1001'))?.withdrawnAt, undefined);
+});
+
+test('service.retentionSweep: a positive window expires enrollments across all stores', async () => {
+  const { service, store, state, consents } = await newService(undefined, undefined, ['--zk-retention-days', '30']);
+  await service.enroll(ENROLL);
+
+  assert.equal((await service.retentionSweep()).removed, 0, 'fresh enrollment is inside the window');
+
+  const future = new Date(Date.now() + 31 * 86_400_000);
+  const sweep = await service.retentionSweep(future);
+  assert.equal(sweep.removed, 1);
+  assert.equal(sweep.scanned, 1);
+  assert.deepEqual(await service.enrollments(), []);
+  assert.deepEqual(state.enrolled, [], 'matcher copy removed');
+  assert.equal(await store.getTemplate(1, 0), undefined, 'wire copy removed');
+  const rec = await consents.get('1001');
+  assert.ok(rec?.withdrawnAt, 'consent marked withdrawn on expiry');
+  assert.match(rec?.withdrawReason ?? '', /retention-expired \(30 days\)/);
+});
+
+test('service.purge: also clears the consent ledger (ADR-011 §5)', async () => {
+  const { service, consents } = await newService();
+  await service.enroll(ENROLL);
+  assert.equal((await consents.list()).length, 1);
+  await service.purge();
+  assert.deepEqual(await consents.list(), [], 'purge leaves no consent record behind');
 });

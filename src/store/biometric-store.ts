@@ -17,6 +17,8 @@ export interface BiometricRecord extends FingerprintTemplate {
   /** 0–100 quality verdict from the capture gate (0 = unknown) */
   quality: number;
   source: BiometricSource;
+  /** station that produced it (`ZK_STATION_ID` or a per-request override) — Phase 8 multi-station */
+  station?: string | undefined;
   /** enrollment timestamp (ISO 8601) */
   createdAt: string;
 }

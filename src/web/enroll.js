@@ -13,6 +13,11 @@ let scores = [];
 let needed = 3;
 let stream = null;
 let busy = false;
+// the statement text comes from the server, never hard-coded here: the page and
+// the consent record must point at the same wording (Phase 8)
+let consentVersion = null;
+// multi-station attribution (?station=camera-2); unset falls back to ZK_STATION_ID
+const STATION = new URLSearchParams(location.search).get('station') ?? '';
 
 const setVerdict = (text, cls) => { const v = $('verdict'); v.textContent = text; v.className = `verdict ${cls ?? ''}`; };
 
@@ -26,11 +31,20 @@ async function boot() {
     sel.appendChild(o);
   }
   try {
+    const statement = await (await fetch('/api/biometric/consent')).json();
+    consentVersion = statement.version;
+    $('consent-text').textContent = statement.text;
+    $('consent-version').textContent = `statement ${statement.version} · purpose: ${statement.purpose}${STATION ? ` · station ${STATION}` : ''}`;
+  } catch {
+    // no statement ⇒ no consent ⇒ no enrollment (ADR-011 §4)
+    $('consent-text').textContent = 'Consent statement unavailable — enrollment is disabled until it can be shown.';
+  }
+  try {
     const status = await (await fetch('/api/biometric/status')).json();
     needed = status.captureSamples ?? 3;
     $('progress').textContent = `Sample 0 of ${needed}`;
   } catch { /* biometrics disabled — start button will surface the 503 */ }
-  $('consent').addEventListener('change', () => { $('start').disabled = !$('consent').checked; });
+  $('consent').addEventListener('change', () => { $('start').disabled = !($('consent').checked && consentVersion); });
   $('start').addEventListener('click', startCapture);
   $('shoot').addEventListener('click', () => { if (!busy) void capture(); });
 }
@@ -103,9 +117,11 @@ async function commit() {
       userId: $('user').value,
       finger: Number($('finger').value),
       consent: true,
+      consentVersion,
       samples,
       quality: Math.min(...scores),
       source: 'camera',
+      ...(STATION ? { station: STATION } : {}),
     }),
   });
   const j = await res.json();

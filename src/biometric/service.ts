@@ -22,6 +22,8 @@ import type { Store } from '../store/types.js';
 import type { BiometricRecord, BiometricSource, BiometricStore } from '../store/biometric-store.js';
 import type { MatcherClient } from './matcher.js';
 import { MatcherUnavailableError } from './matcher.js';
+import type { ConsentLedger, ConsentRecord } from './consent.js';
+import { consentStatement, type ConsentStatement } from './consent-text.js';
 import { assessQuality, qualityThresholds, type QualityMetrics } from '../capture/quality.js';
 
 export const DEFAULT_MATCH_THRESHOLD = 40;
@@ -52,6 +54,33 @@ export interface BiometricStatus {
   threshold: number;
   separation: number;
   captureSamples: number;
+  /** Phase 8 — consent records on file (count only, never contents) */
+  consents: number;
+  /** Phase 8 — 0 = templates live as long as the employee record does (ADR-011 §5) */
+  retentionDays: number;
+  /** Phase 8 — statement version this deployment collects consent against */
+  consentVersion: string;
+  /** Phase 8 — station identity stamped into consent/enrollment records */
+  stationId: string;
+}
+
+/** Enrollment roster row — metadata only; template bytes never leave the service (ADR-011 §3). */
+export interface EnrollmentMetadata {
+  uid: number;
+  userId: string;
+  name: string;
+  finger: number;
+  format: string;
+  source: string;
+  /** station that produced it (`ZK_STATION_ID` or a per-request override) */
+  station: string;
+  quality: number;
+  createdAt: string;
+}
+
+/** Consent roster row — a `ConsentRecord` enriched with the employee name for the admin view. */
+export interface ConsentView extends ConsentRecord {
+  name: string;
 }
 
 export type CaptureVerdict =
@@ -74,6 +103,10 @@ export interface EnrollInput {
   template: Buffer;
   /** explicit, logged consent — mandatory (ADR-011 §4) */
   consent: boolean;
+  /** statement version the enrollee actually read; a stale value is rejected (Phase 8) */
+  consentVersion?: string | undefined;
+  /** station that collected it — defaults to `ZK_STATION_ID` (Phase 8) */
+  station?: string | undefined;
   quality?: number | undefined;
   source?: BiometricSource | undefined;
 }
@@ -84,6 +117,8 @@ export class BiometricService {
       config: Config;
       store: Store;
       bio: BiometricStore;
+      /** consent ledger (Phase 8, ADR-011 §4) */
+      consent: ConsentLedger;
       matcher: MatcherClient;
       logger: Logger;
     },
@@ -97,6 +132,65 @@ export class BiometricService {
     return this.deps.config.matchSeparation ?? DEFAULT_MATCH_SEPARATION;
   }
 
+  private get station(): string {
+    return this.deps.config.stationId;
+  }
+
+  /**
+   * Consent gate (ADR-011 §4, NFR-10). The boolean was always mandatory; Phase 8
+   * additionally pins *which statement text* the enrollee saw. A page presenting
+   * an outdated statement is rejected — consent to text nobody read is not consent.
+   */
+  private consentFor(input: { consent: boolean; consentVersion?: string | undefined }): ConsentStatement {
+    if (!input.consent) {
+      throw new BiometricServiceError(400, 'enrollment requires explicit consent (ADR-011 §4)');
+    }
+    const current = this.deps.config.consentVersion;
+    if (input.consentVersion !== undefined && input.consentVersion !== current) {
+      throw new BiometricServiceError(
+        409,
+        `consent statement ${input.consentVersion} is outdated (current: ${current}) — reload the enrollment page`,
+      );
+    }
+    const statement = consentStatement(current);
+    if (!statement) throw new BiometricServiceError(500, `consent statement ${current} is not available`);
+    return statement;
+  }
+
+  /** The statement the enrollment page must render — served, never hard-coded in the page. */
+  consentStatement(): ConsentStatement {
+    const statement = consentStatement(this.deps.config.consentVersion);
+    if (!statement) throw new BiometricServiceError(500, `consent statement ${this.deps.config.consentVersion} is not available`);
+    return statement;
+  }
+
+  /** Persist the accountability record for a completed, consented enrollment. */
+  private async recordConsent(
+    user: { uid: number; userId: string },
+    statement: ConsentStatement,
+    method: BiometricSource,
+    station: string,
+    at: Date = new Date(),
+  ): Promise<void> {
+    await this.deps.consent.put({
+      userId: user.userId,
+      uid: user.uid,
+      statementVersion: statement.version,
+      statementHash: statement.hash,
+      purpose: statement.purpose,
+      method,
+      station,
+      at: at.toISOString(),
+    });
+    this.deps.logger.info('biometric consent recorded', {
+      userId: user.userId,
+      uid: user.uid,
+      statement: statement.version,
+      method,
+      station,
+    });
+  }
+
   async status(): Promise<BiometricStatus> {
     const health = await this.deps.matcher.health();
     return {
@@ -107,7 +201,111 @@ export class BiometricService {
       threshold: this.threshold,
       separation: this.separation,
       captureSamples: Math.max(2, this.deps.config.captureSamples),
+      consents: (await this.deps.consent.list()).length,
+      retentionDays: this.deps.config.retentionDays,
+      consentVersion: this.deps.config.consentVersion,
+      stationId: this.station,
     };
+  }
+
+  /**
+   * Enrollment roster for the admin view (`GET /api/biometric/enrollments`) —
+   * **metadata only**: templates never leave this method, not even base64.
+   */
+  async enrollments(): Promise<EnrollmentMetadata[]> {
+    const out: EnrollmentMetadata[] = [];
+    for (const rec of await this.deps.bio.list()) {
+      const user = await this.deps.store.getUser(rec.uid);
+      out.push({
+        uid: rec.uid,
+        userId: rec.userId || user?.userId || '',
+        name: user?.name ?? '',
+        finger: rec.finger,
+        format: rec.format,
+        source: rec.source,
+        station: rec.station ?? '',
+        quality: rec.quality,
+        createdAt: rec.createdAt,
+      });
+    }
+    return out;
+  }
+
+  /** Consent roster (`GET /api/biometric/consents`) — accountability metadata, no biometrics. */
+  async consents(): Promise<ConsentView[]> {
+    const out: ConsentView[] = [];
+    for (const rec of await this.deps.consent.list()) {
+      const user = await this.deps.store.getUser(rec.uid);
+      out.push({ ...rec, name: user?.name ?? '' });
+    }
+    return out;
+  }
+
+  /**
+   * Employee withdrawal (ADR-011 §5, NFR-10 — "a working deletion path per
+   * employee"): every template for the employee is deleted from all three stores
+   * and the consent record is marked withdrawn. Idempotent, so a repeated call
+   * still reports success with `removed: 0`.
+   */
+  async withdrawEmployee(
+    userId: string,
+    reason = 'withdrawn by employee',
+  ): Promise<{ userId: string; uid: number; removed: number; consentOnFile: boolean }> {
+    const user = await this.deps.store.getUserByUserId(userId);
+    if (!user) throw new BiometricServiceError(404, `unknown employee: ${userId}`);
+    const mine = (await this.deps.bio.list()).filter((r) => r.uid === user.uid);
+    for (const rec of mine) {
+      await this.deps.bio.remove(rec.uid, rec.finger);
+      await this.deps.store.deleteTemplate(rec.uid, rec.finger);
+      await this.deps.matcher.removeTemplate(rec.uid, rec.finger).catch(() => undefined);
+    }
+    const withdrawn = await this.deps.consent.withdraw(userId, reason);
+    this.deps.logger.info('biometric withdrawal complete', {
+      userId,
+      uid: user.uid,
+      removed: mine.length,
+      consentOnFile: withdrawn !== undefined,
+    });
+    return { userId, uid: user.uid, removed: mine.length, consentOnFile: withdrawn !== undefined };
+  }
+
+  /**
+   * Retention sweep (ADR-011 §5, `ZK_RETENTION_DAYS`): with a positive window,
+   * enrollments older than it are deleted from all three stores and their consent
+   * record is marked withdrawn. The default `0` is the ADR-011 rule — templates
+   * exist only while the employee record does — and sweeps nothing.
+   */
+  async retentionSweep(now: Date = new Date()): Promise<{ scanned: number; removed: number }> {
+    const days = this.deps.config.retentionDays;
+    const all = await this.deps.bio.list();
+    if (days <= 0) return { scanned: all.length, removed: 0 };
+    const cutoff = now.getTime() - days * 86_400_000;
+    let removed = 0;
+    for (const rec of all) {
+      const created = Date.parse(rec.createdAt);
+      if (!Number.isFinite(created) || created > cutoff) continue;
+      try {
+        await this.deps.bio.remove(rec.uid, rec.finger);
+        await this.deps.store.deleteTemplate(rec.uid, rec.finger);
+        await this.deps.matcher.removeTemplate(rec.uid, rec.finger).catch(() => undefined);
+        await this.deps.consent.withdraw(rec.userId, `retention-expired (${days} days)`);
+        removed += 1;
+      } catch (err) {
+        this.deps.logger.warn('retention sweep could not remove an enrollment', {
+          uid: rec.uid,
+          finger: rec.finger,
+          err: String(err),
+        });
+      }
+    }
+    if (removed > 0) {
+      this.deps.logger.info('biometric retention sweep removed expired enrollments', {
+        removed,
+        scanned: all.length,
+        retentionDays: days,
+      });
+    }
+    return { scanned: all.length, removed };
   }
 
   /**
@@ -142,12 +340,12 @@ export class BiometricService {
     finger: number;
     consent: boolean;
     samples: Buffer[];
+    consentVersion?: string | undefined;
+    station?: string | undefined;
     quality?: number | undefined;
     source?: BiometricSource | undefined;
   }): Promise<{ uid: number; finger: number; userId: string; samples: number; consistency: number[] }> {
-    if (!input.consent) {
-      throw new BiometricServiceError(400, 'enrollment requires explicit consent (ADR-011 §4)');
-    }
+    this.consentFor(input); // gate before any matching work is done
     if (!Number.isInteger(input.finger) || input.finger < 0 || input.finger > 9) {
       throw new BiometricServiceError(400, 'finger must be an integer 0-9');
     }
@@ -202,6 +400,8 @@ export class BiometricService {
       userId: input.userId,
       finger: input.finger,
       consent: input.consent,
+      consentVersion: input.consentVersion,
+      station: input.station,
       template,
       quality: input.quality,
       source: input.source ?? 'camera',
@@ -211,9 +411,7 @@ export class BiometricService {
 
   /** Store an enrolled template: encrypted copy + FR-8 wire record + sidecar candidate. */
   async enroll(input: EnrollInput): Promise<{ uid: number; finger: number; userId: string }> {
-    if (!input.consent) {
-      throw new BiometricServiceError(400, 'enrollment requires explicit consent (ADR-011 §4)');
-    }
+    const statement = this.consentFor(input);
     if (!Number.isInteger(input.finger) || input.finger < 0 || input.finger > 9) {
       throw new BiometricServiceError(400, 'finger must be an integer 0-9');
     }
@@ -225,6 +423,7 @@ export class BiometricService {
       throw new BiometricServiceError(404, `unknown employee: ${input.userId}`);
     }
 
+    const station = input.station ?? this.station;
     const record: BiometricRecord = {
       uid: user.uid,
       finger: input.finger,
@@ -234,6 +433,7 @@ export class BiometricService {
       userId: user.userId,
       quality: Math.max(0, Math.min(100, Math.round(input.quality ?? 0))),
       source: input.source ?? 'imported',
+      station,
       createdAt: new Date().toISOString(),
     };
     await this.deps.bio.put(record);
@@ -260,8 +460,10 @@ export class BiometricService {
       finger: input.finger,
       bytes: input.template.length,
       source: record.source,
+      station,
       quality: record.quality,
     });
+    await this.recordConsent(user, statement, record.source, station);
     return { uid: user.uid, finger: input.finger, userId: user.userId };
   }
 
@@ -297,8 +499,11 @@ export class BiometricService {
     const user = await this.deps.store.getUser(top.uid);
     if (!user) {
       // retention rule (ADR-011 §5): templates exist only while the employee does
+      const orphan = await this.deps.bio.get(top.uid, top.finger).catch(() => undefined);
       await this.deps.bio.remove(top.uid, top.finger).catch(() => undefined);
       await this.deps.matcher.removeTemplate(top.uid, top.finger).catch(() => undefined);
+      // the consent record stays as accountability evidence, marked withdrawn
+      if (orphan?.userId) await this.deps.consent.withdraw(orphan.userId, 'employee-deleted').catch(() => undefined);
       this.deps.logger.warn('orphaned biometric template removed on identify', { uid: top.uid, finger: top.finger });
       return { decision: 'not-enrolled', reason: 'template belonged to a deleted employee' };
     }
@@ -335,7 +540,8 @@ export class BiometricService {
         wire += 1;
       }
     }
-    this.deps.logger.info('biometric purge complete', { encrypted: purged, wire: wire });
+    const consents = await this.deps.consent.purge();
+    this.deps.logger.info('biometric purge complete', { encrypted: purged, wire: wire, consents: consents });
     return purged;
   }
 
@@ -352,6 +558,9 @@ export class BiometricService {
       if (!user || !wire) {
         await this.deps.bio.remove(rec.uid, rec.finger);
         await this.deps.matcher.removeTemplate(rec.uid, rec.finger).catch(() => undefined);
+        await this.deps.consent
+          .withdraw(rec.userId, user ? 'wire-copy-missing' : 'employee-deleted')
+          .catch(() => undefined);
         removed += 1;
       }
     }

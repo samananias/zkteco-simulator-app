@@ -11,6 +11,8 @@ const REASONS = {
 
 let stream = null;
 let busy = false;
+// multi-station attribution (?station=scan-2); unset falls back to ZK_STATION_ID
+const STATION = new URLSearchParams(location.search).get('station') ?? '';
 
 const setVerdict = (text, cls) => { const v = $('verdict'); v.textContent = text; v.className = `verdict ${cls ?? ''}`; };
 
@@ -62,7 +64,7 @@ async function punch() {
     const res = await fetch('/api/biometric/punch', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ templateB64: capJson.templateB64 }),
+      body: JSON.stringify({ templateB64: capJson.templateB64, ...(STATION ? { station: STATION } : {}) }),
     });
     const j = await res.json();
     if (res.status === 503) {

@@ -22,6 +22,8 @@ interface Envelope {
   flag: number;
   quality: number;
   source: BiometricRecord['source'];
+  /** Phase 8 — station attribution; absent in records written before Phase 8 */
+  station?: string | undefined;
   createdAt: string;
   templateB64: string;
 }
@@ -51,6 +53,7 @@ export class EncryptedBiometricStore implements BiometricStore {
       flag: record.flag,
       quality: record.quality,
       source: record.source,
+      station: record.station,
       createdAt: record.createdAt,
       templateB64: record.template.toString('base64'),
     };
@@ -75,6 +78,7 @@ export class EncryptedBiometricStore implements BiometricStore {
       flag: envelope.flag,
       quality: envelope.quality,
       source: envelope.source,
+      station: envelope.station,
       createdAt: envelope.createdAt,
       template: Buffer.from(envelope.templateB64, 'base64'),
     };

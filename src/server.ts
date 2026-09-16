@@ -17,8 +17,10 @@ import { ProtocolEngine } from './core/engine.js';
 import { HttpServer } from './core/http.js';
 import { generateSessionKey, loadBiometricKey } from './biometric/crypto.js';
 import { EncryptedBiometricStore } from './biometric/store.js';
+import { ConsentLedger } from './biometric/consent.js';
 import { MatcherClient } from './biometric/matcher.js';
 import { BiometricService } from './biometric/service.js';
+import path from 'node:path';
 
 export interface SimulatorHandle {
   stop(): Promise<void>;
@@ -74,9 +76,19 @@ export async function startSimulator(config: Config, logger: Logger = createLogg
     }
     const bio = new EncryptedBiometricStore(config.biometricDataDir, key);
     await bio.init();
-    biometric = new BiometricService({ config, store, bio, matcher, logger });
+    const consent = new ConsentLedger(path.join(config.biometricDataDir, 'consent'));
+    await consent.init();
+    biometric = new BiometricService({ config, store, bio, consent, matcher, logger });
     await biometric.reconcile();
-    logger.info('biometric subsystem enabled', { matcher: config.matcherUrl, dataDir: config.biometricDataDir });
+    const bootSweep = await biometric.retentionSweep();
+    if (bootSweep.removed > 0) logger.info('biometric retention sweep at boot', bootSweep);
+    logger.info('biometric subsystem enabled', {
+      matcher: config.matcherUrl,
+      dataDir: config.biometricDataDir,
+      station: config.stationId,
+      consentVersion: config.consentVersion,
+      retentionDays: config.retentionDays,
+    });
   } else {
     logger.info('biometric subsystem disabled (NFR-12) — set ZK_MATCHER_URL to enable');
   }
@@ -100,10 +112,27 @@ export async function startSimulator(config: Config, logger: Logger = createLogg
   });
   await http.start();
 
+  // Retention policy (Phase 8, ADR-011 §5) — a daily sweep. The default 0 is the
+  // ADR rule itself ("templates exist only while the employee record does"), so
+  // nothing is scheduled; a positive window opts into automatic expiry.
+  let retentionTimer: NodeJS.Timeout | undefined;
+  if (biometric && config.retentionDays > 0) {
+    retentionTimer = setInterval(() => {
+      const svc = biometric;
+      if (!svc) return;
+      void svc
+        .retentionSweep()
+        .catch((err: unknown) => logger.warn('retention sweep failed', { err: String(err) }));
+    }, 86_400_000);
+    retentionTimer.unref(); // never hold the process (or a test) open
+    logger.info('biometric retention sweep scheduled', { retentionDays: config.retentionDays });
+  }
+
   return {
     tcpPort: engine.tcpPort,
     httpPort: http.port,
     stop: async () => {
+      if (retentionTimer) clearInterval(retentionTimer);
       await http.stop();
       await engine.stop();
       await store.close();

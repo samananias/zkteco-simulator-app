@@ -131,8 +131,8 @@ export class HttpServer {
         return await this.biometricRoute(req, res, url.pathname);
       }
       if (req.method === 'GET') {
-        if (url.pathname === '/enroll' || url.pathname === '/scan') {
-          return await this.serveStatic(res, `${url.pathname}.html`); // camera-station PWA pages (Phase 7)
+        if (url.pathname === '/enroll' || url.pathname === '/scan' || url.pathname === '/biometric') {
+          return await this.serveStatic(res, `${url.pathname}.html`); // station + admin pages (Phase 7–8)
         }
         return await this.serveStatic(res, url.pathname);
       }
@@ -196,6 +196,23 @@ export class HttpServer {
       return;
     }
     try {
+      if (pathname === '/api/biometric/consent' && req.method === 'GET') {
+        // the statement the enrollment page renders — served, never hard-coded in the page
+        return await this.json(res, svc.consentStatement());
+      }
+      if (pathname === '/api/biometric/enrollments' && req.method === 'GET') {
+        // metadata only — the encrypted templates never cross this boundary (ADR-011 §3)
+        return await this.json(res, { enrollments: await svc.enrollments() });
+      }
+      if (pathname === '/api/biometric/consents' && req.method === 'GET') {
+        return await this.json(res, { consents: await svc.consents() });
+      }
+      if (pathname === '/api/biometric/withdraw' && req.method === 'POST') {
+        // employee-initiated deletion path (ADR-011 §5 / NFR-10)
+        const body = await readJson<{ userId?: string; reason?: string }>(req);
+        const result = await svc.withdrawEmployee(String(body.userId ?? ''), body.reason);
+        return await this.json(res, { ok: true, ...result });
+      }
       if (pathname === '/api/biometric/capture' && req.method === 'POST') {
         // raw image body (octet-stream) — measured + extracted in the sidecar, judged here
         const image = await readRaw(req);
@@ -215,12 +232,19 @@ export class HttpServer {
       }
       if (pathname === '/api/biometric/punch' && req.method === 'POST') {
         // the punch-controller composition point (biometric-core §2): identify → record
-        const body = await readJson<{ templateB64?: string; state?: number }>(req);
+        const body = await readJson<{ templateB64?: string; state?: number; station?: string }>(req);
         const template = body.templateB64 ? Buffer.from(body.templateB64, 'base64') : Buffer.alloc(0);
+        const station = body.station ?? this.deps.config.stationId;
         const verdict = await svc.identify(template);
         if (verdict.decision !== 'match') {
           const at = this.deps.device.now();
           this.deps.bus.emit('verify', { result: 'fail', userId: verdict.userId ?? '', verifyType: 1, at });
+          this.deps.logger.info('biometric punch rejected', {
+            decision: verdict.decision,
+            reason: verdict.reason,
+            score: verdict.score,
+            station,
+          });
           return await this.json(res, { result: 'fail', decision: verdict.decision, reason: verdict.reason, score: verdict.score });
         }
         if (!this.deps.device.isEnabled()) {
@@ -235,7 +259,12 @@ export class HttpServer {
           return;
         }
         const record = await this.recordPunch(user, { verifyType: 1, state: body.state ?? 0 });
-        this.deps.logger.info('biometric punch accepted', { userId: user.userId, name: user.name, score: verdict.score });
+        this.deps.logger.info('biometric punch accepted', {
+          userId: user.userId,
+          name: user.name,
+          score: verdict.score,
+          station,
+        });
         return await this.json(res, {
           result: 'pass',
           decision: 'match',
@@ -253,6 +282,8 @@ export class HttpServer {
           quality?: number;
           source?: 'camera' | 'usb-otg' | 'pc-scanner' | 'imported';
           consent?: boolean;
+          consentVersion?: string;
+          station?: string;
         }>(req);
         if (Array.isArray(body.samples) && body.samples.length > 0) {
           // N-sample ceremony (FR-14) — samples are capture-endpoint outputs
@@ -261,6 +292,8 @@ export class HttpServer {
             finger: Number(body.finger),
             consent: body.consent === true,
             samples: body.samples.map((s) => Buffer.from(String(s), 'base64')),
+            consentVersion: body.consentVersion,
+            station: body.station,
             quality: body.quality,
             source: body.source,
           });
@@ -272,6 +305,8 @@ export class HttpServer {
           finger: Number(body.finger),
           template,
           consent: body.consent === true,
+          consentVersion: body.consentVersion,
+          station: body.station,
           quality: body.quality,
           source: body.source,
         });

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZKTeco Simulator — Biometric Admin</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="device admin">
+  <div class="brand-row"><span class="brand">ZKTECO</span><span class="watermark">BIOMETRIC ADMIN</span></div>
+
+  <div class="screen admin-screen">
+    <div class="station-title">Biometric data &amp; consent</div>
+    <div class="admin-status" id="status">loading…</div>
+
+    <div class="admin-section">
+      <h3>Enrolled templates <span class="admin-count" id="enroll-count">0</span></h3>
+      <div class="admin-table-wrap">
+        <table class="admin-table" id="enroll-table">
+          <thead>
+            <tr><th>Employee</th><th>Finger</th><th>Source</th><th>Station</th><th>Quality</th><th>Enrolled</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="station-note">Metadata only — template bytes never reach this page (ADR-011 §3).</div>
+    </div>
+
+    <div class="admin-section">
+      <h3>Consent records <span class="admin-count" id="consent-count">0</span></h3>
+      <div class="admin-table-wrap">
+        <table class="admin-table" id="consent-table">
+          <thead>
+            <tr><th>Employee</th><th>Statement</th><th>Method</th><th>Station</th><th>Given</th><th>Status</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="station-note">Withdraw deletes every template for that employee and marks the consent withdrawn (ADR-011 §5).</div>
+    </div>
+
+    <div class="admin-section admin-danger">
+      <h3>Danger zone</h3>
+      <div class="admin-danger-note">
+        Purge deletes every encrypted template, every FR-8 wire copy and every consent record.
+        It cannot be undone — employees must re-enroll.
+      </div>
+      <label class="admin-confirm">Type <b>PURGE</b> to confirm
+        <input type="text" id="purge-confirm" placeholder="PURGE" autocomplete="off" spellcheck="false">
+      </label>
+      <button class="station-btn admin-danger-btn" id="purge" disabled>PURGE EVERYTHING</button>
+      <div class="verdict" id="purge-verdict"></div>
+    </div>
+
+    <div class="admin-foot">
+      <a class="station-note" href="/">← back to the device face</a>
+      <a class="station-note" href="/enroll">enroll station</a>
+      <a class="station-note" href="/scan">scan station</a>
+    </div>
+  </div>
+
+  <div class="grille" aria-hidden="true"></div>
+</div>
+
+<script src="/biometric.js"></script>
+</body>
+</html>

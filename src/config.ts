@@ -5,6 +5,7 @@
  */
 
 import type { ChecksumVariant } from './protocol/checksum.js';
+import { consentVersions } from './biometric/consent-text.js';
 
 export type LogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
 export type ReadMode = 'direct' | 'chunked';
@@ -39,6 +40,12 @@ export interface Config {
   qualityMinBrightness: number;
   qualityMinSharpness: number;
   qualityMinCoverage: number;
+  /** Phase 8 — consent statement version the ledger references (ADR-011 §4) */
+  consentVersion: string;
+  /** Phase 8 — 0 = templates live as long as the employee record does (ADR-011 §5) */
+  retentionDays: number;
+  /** Phase 8 — station identity stamped into consent/enrollment records (multi-station) */
+  stationId: string;
 }
 
 const DEFAULTS: Config = {
@@ -65,6 +72,9 @@ const DEFAULTS: Config = {
   qualityMinBrightness: 60,
   qualityMinSharpness: 25,
   qualityMinCoverage: 18,
+  consentVersion: 'v1',
+  retentionDays: 0,
+  stationId: 'camera-1',
 };
 
 /** env var name -> config key */
@@ -92,6 +102,9 @@ const ENV_MAP: Record<string, keyof Config> = {
   ZK_QUALITY_MIN_BRIGHTNESS: 'qualityMinBrightness',
   ZK_QUALITY_MIN_SHARPNESS: 'qualityMinSharpness',
   ZK_QUALITY_MIN_COVERAGE: 'qualityMinCoverage',
+  ZK_CONSENT_VERSION: 'consentVersion',
+  ZK_RETENTION_DAYS: 'retentionDays',
+  ZK_STATION_ID: 'stationId',
 };
 
 export class ConfigError extends Error {}
@@ -107,6 +120,7 @@ const INT_KEYS: ReadonlySet<keyof Config> = new Set([
   'qualityMinBrightness',
   'qualityMinSharpness',
   'qualityMinCoverage',
+  'retentionDays',
 ]);
 
 function coerce(key: keyof Config, raw: string): unknown {
@@ -115,6 +129,9 @@ function coerce(key: keyof Config, raw: string): unknown {
     if (!Number.isFinite(n)) throw new ConfigError(`${key}: expected an integer, received "${raw}"`);
     if (key === 'tcpPort' || key === 'httpPort') {
       if (n < 1 || n > 65535) throw new ConfigError(`${key}: port out of range 1-65535 (received ${n})`);
+    }
+    if (key === 'retentionDays' && n < 0) {
+      throw new ConfigError(`${key}: must be >= 0 (0 = keep templates while the employee record exists)`);
     }
     return n;
   }
@@ -133,6 +150,11 @@ function coerce(key: keyof Config, raw: string): unknown {
   const allowed = enumerated[key];
   if (allowed && !allowed.includes(raw)) {
     throw new ConfigError(`${key}: expected one of ${allowed.join(' | ')}, received "${raw}"`);
+  }
+  if (key === 'consentVersion' && !consentVersions().includes(raw)) {
+    throw new ConfigError(
+      `${key}: unknown consent statement version "${raw}" (available: ${consentVersions().join(' | ')})`,
+    );
   }
   return raw;
 }
