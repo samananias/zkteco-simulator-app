@@ -22,6 +22,7 @@ import type { Store } from '../store/types.js';
 import type { BiometricRecord, BiometricSource, BiometricStore } from '../store/biometric-store.js';
 import type { MatcherClient } from './matcher.js';
 import { MatcherUnavailableError } from './matcher.js';
+import { assessQuality, qualityThresholds, type QualityMetrics } from '../capture/quality.js';
 
 export const DEFAULT_MATCH_THRESHOLD = 40;
 export const DEFAULT_MATCH_SEPARATION = 20;
@@ -50,7 +51,12 @@ export interface BiometricStatus {
   enrolled: number;
   threshold: number;
   separation: number;
+  captureSamples: number;
 }
+
+export type CaptureVerdict =
+  | { decision: 'accept'; template: Buffer; quality: QualityMetrics; score: number }
+  | { decision: 'reject'; reason: string; quality?: QualityMetrics | undefined; score: number };
 
 export class BiometricServiceError extends Error {
   constructor(
@@ -100,7 +106,107 @@ export class BiometricService {
       enrolled: (await this.deps.bio.list()).length,
       threshold: this.threshold,
       separation: this.separation,
+      captureSamples: Math.max(2, this.deps.config.captureSamples),
     };
+  }
+
+  /**
+   * Capture pipeline (FR-16.1): image → sidecar extraction (+ measurement) →
+   * configurable quality verdict. Rejections carry an actionable reason so the
+   * capture page can tell the user what to fix. The image exists only inside
+   * this call — never stored (ADR-011 §1).
+   */
+  async captureProbe(image: Buffer): Promise<CaptureVerdict> {
+    const { template, quality } = await this.deps.matcher.extractImage(image);
+    if (!quality) return { decision: 'reject', reason: 'unreadable', score: 0 };
+    const verdict = assessQuality(quality, qualityThresholds(this.deps.config));
+    if (!verdict.pass) {
+      this.deps.logger.info('capture rejected by quality gate', {
+        reason: verdict.reason,
+        quality,
+      });
+      return { decision: 'reject', reason: verdict.reason ?? 'poor-quality', quality, score: verdict.score };
+    }
+    return { decision: 'accept', template, quality, score: verdict.score };
+  }
+
+  /**
+   * N-sample enrollment ceremony (FR-14): every sample pair must clear the accept
+   * threshold on the engine's consistency check before anything is stored; the
+   * most central sample (highest average pairwise score) becomes the template.
+   * Samples arrive as already-extracted ISO templates (the capture endpoint's
+   * output) — no image ever reaches here.
+   */
+  async enrollWithSamples(input: {
+    userId: string;
+    finger: number;
+    consent: boolean;
+    samples: Buffer[];
+    quality?: number | undefined;
+    source?: BiometricSource | undefined;
+  }): Promise<{ uid: number; finger: number; userId: string; samples: number; consistency: number[] }> {
+    if (!input.consent) {
+      throw new BiometricServiceError(400, 'enrollment requires explicit consent (ADR-011 §4)');
+    }
+    if (!Number.isInteger(input.finger) || input.finger < 0 || input.finger > 9) {
+      throw new BiometricServiceError(400, 'finger must be an integer 0-9');
+    }
+    const min = Math.max(2, this.deps.config.captureSamples);
+    if (!Array.isArray(input.samples) || input.samples.length < min) {
+      throw new BiometricServiceError(400, `at least ${min} samples are required (received ${input.samples?.length ?? 0})`);
+    }
+    for (const s of input.samples) {
+      if (!Buffer.isBuffer(s) || s.length < 8) throw new BiometricServiceError(400, 'a sample template is missing or too short');
+    }
+    const user = await this.deps.store.getUserByUserId(input.userId);
+    if (!user) throw new BiometricServiceError(404, `unknown employee: ${input.userId}`);
+
+    const samples = input.samples;
+    const pairScores: { i: number; j: number; score: number }[] = [];
+    for (let i = 0; i < samples.length; i++) {
+      for (let j = i + 1; j < samples.length; j++) {
+        const si = samples[i];
+        const sj = samples[j];
+        if (!si || !sj) continue; // unreachable after the length checks above
+        const score = await this.deps.matcher.matchTemplates(si, sj);
+        pairScores.push({ i, j, score: Math.round(score * 100) / 100 });
+      }
+    }
+    for (const p of pairScores) {
+      if (p.score < this.threshold) {
+        throw new BiometricServiceError(
+          409,
+          `samples are not mutually consistent (pair ${p.i}-${p.j}: ${p.score.toFixed(1)} < threshold ${this.threshold}) — recapture the finger`,
+        );
+      }
+    }
+    // representative sample: highest average pairwise score (the most central one)
+    const totals = new Map<number, number>();
+    for (const p of pairScores) {
+      totals.set(p.i, (totals.get(p.i) ?? 0) + p.score);
+      totals.set(p.j, (totals.get(p.j) ?? 0) + p.score);
+    }
+    let best = 0;
+    let bestAvg = -1;
+    for (let i = 0; i < samples.length; i++) {
+      const a = (totals.get(i) ?? 0) / Math.max(1, samples.length - 1);
+      if (a > bestAvg) {
+        bestAvg = a;
+        best = i;
+      }
+    }
+    const template = samples[best];
+    if (!template) throw new BiometricServiceError(400, 'sample selection failed');
+    const consistency = pairScores.map((p) => p.score);
+    const enrolled = await this.enroll({
+      userId: input.userId,
+      finger: input.finger,
+      consent: input.consent,
+      template,
+      quality: input.quality,
+      source: input.source ?? 'camera',
+    });
+    return { ...enrolled, samples: samples.length, consistency };
   }
 
   /** Store an enrolled template: encrypted copy + FR-8 wire record + sidecar candidate. */

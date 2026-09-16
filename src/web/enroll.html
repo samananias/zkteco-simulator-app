@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZKTeco Simulator — Enroll Station</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="device">
+  <div class="brand-row"><span class="brand">ZKTECO</span><span class="watermark">ENROLL</span></div>
+
+  <div class="screen">
+    <div id="setup">
+      <div class="station-title">Fingerprint enrollment</div>
+      <div class="station-form">
+        <label>Employee
+          <select id="user"><option value="">loading…</option></select>
+        </label>
+        <label>Finger
+          <select id="finger">
+            <option value="0">Right index (0)</option>
+            <option value="1">Right middle (1)</option>
+            <option value="2">Right thumb (2)</option>
+          </select>
+        </label>
+        <label class="station-consent">
+          <input type="checkbox" id="consent">
+          <span>I consent to having my fingerprint captured for attendance identification only. A fingerprint image is taken, reduced to a mathematical template, encrypted, and the image is discarded — never stored.</span>
+        </label>
+        <button class="station-btn" id="start" disabled>START ENROLLMENT</button>
+        <div class="station-note">Requires a camera. Finger on a plain white surface works.</div>
+      </div>
+    </div>
+
+    <div id="capture" hidden>
+      <div class="cam-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <div class="framing"></div>
+      </div>
+      <div class="progress" id="progress">Sample 0 of 3</div>
+      <button class="station-btn" id="shoot" style="width:100%">CAPTURE SAMPLE</button>
+      <div class="verdict" id="verdict"></div>
+    </div>
+
+    <div id="done" hidden>
+      <div class="station-done">✔ Enrolled — <span id="done-name"></span></div>
+      <div class="station-note" id="done-detail"></div>
+      <a class="station-btn" href="/scan" style="display:block;text-align:center;margin-top:14px">GO TO SCAN STATION</a>
+    </div>
+
+    <div id="nocam" hidden>
+      <div class="station-done" style="color:var(--fail)">Camera unavailable</div>
+      <div class="station-note">Allow camera access, or enroll by importing a template file (REST: POST /api/biometric/enroll).</div>
+    </div>
+  </div>
+
+  <div class="grille" aria-hidden="true"></div>
+</div>
+
+<script src="/enroll.js"></script>
+</body>
+</html>

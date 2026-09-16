@@ -106,6 +106,7 @@ public class MatcherSidecar {
                 int dpi = intOr(p, "dpi", 500);
                 FingerprintTemplate t = extract(body, dpi);
                 return new Response(200, "{\"ok\":true,\"format\":\"iso19794-2\""
+                        + qualityJson(body)
                         + ",\"templateB64\":\"" + b64(FingerprintCompatibility.exportTemplates(TemplateFormat.ISO_19794_2_2005, t)) + "\""
                         + "}");
             }
@@ -180,6 +181,70 @@ public class MatcherSidecar {
 
     static FingerprintTemplate extract(byte[] image, int dpi) {
         return new FingerprintTemplate(new FingerprintImage(image, new FingerprintImageOptions().dpi(dpi)));
+    }
+
+    /**
+     * Capture-quality measurement over the decoded image (ADR-009 / FR-16.1).
+     * Measurement only — the *policy* (thresholds, verdict) lives in the app so it
+     * stays configurable (ADR-011 §7). brightness = grayscale mean (0-255);
+     * sharpness = Laplacian variance (blur metric); coverage = fraction of 8×8
+     * blocks with texture (ridge presence — rejects blank/partial frames).
+     */
+    static String qualityJson(byte[] image) {
+        try {
+            java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(image));
+            if (img == null) return "";
+            int w = img.getWidth(), h = img.getHeight();
+            int[] gray = new int[w * h];
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    int p = img.getRGB(x, y);
+                    int r = (p >> 16) & 0xff, g = (p >> 8) & 0xff, b = p & 0xff;
+                    gray[y * w + x] = (r * 77 + g * 151 + b * 28) >> 8;
+                }
+            }
+            double sum = 0;
+            for (int v : gray) sum += v;
+            double brightness = sum / gray.length;
+            double lapSum = 0, lapSq = 0;
+            int n = 0;
+            for (int y = 1; y < h - 1; y++) {
+                for (int x = 1; x < w - 1; x++) {
+                    int c = gray[y * w + x];
+                    double lap = Math.abs(4.0 * c - gray[(y - 1) * w + x] - gray[(y + 1) * w + x] - gray[y * w + x - 1] - gray[y * w + x + 1]);
+                    lapSum += lap;
+                    lapSq += lap * lap;
+                    n++;
+                }
+            }
+            double lapMean = n > 0 ? lapSum / n : 0;
+            double sharpness = n > 0 ? Math.max(0, lapSq / n - lapMean * lapMean) : 0;
+            int blocks = 0, textured = 0;
+            for (int by = 0; by < h; by += 8) {
+                for (int bx = 0; bx < w; bx += 8) {
+                    double bs = 0, bsq = 0;
+                    int bn = 0;
+                    for (int y = by; y < Math.min(by + 8, h); y++) {
+                        for (int x = bx; x < Math.min(bx + 8, w); x++) {
+                            double v = gray[y * w + x];
+                            bs += v;
+                            bsq += v * v;
+                            bn++;
+                        }
+                    }
+                    if (bn == 0) continue;
+                    double mean = bs / bn, var = Math.max(0, bsq / bn - mean * mean);
+                    blocks++;
+                    if (Math.sqrt(var) > 12) textured++;
+                }
+            }
+            double coverage = blocks > 0 ? (double) textured / blocks : 0;
+            return ",\"quality\":{\"brightness\":" + fmt(brightness)
+                    + ",\"sharpness\":" + fmt(sharpness)
+                    + ",\"coverage\":" + fmt(coverage) + "}";
+        } catch (Throwable e) {
+            return ""; // metrics are best-effort; extraction result carries the verdict
+        }
     }
 
     /**

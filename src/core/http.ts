@@ -130,7 +130,12 @@ export class HttpServer {
       if (url.pathname.startsWith('/api/biometric/')) {
         return await this.biometricRoute(req, res, url.pathname);
       }
-      if (req.method === 'GET') return await this.serveStatic(res, url.pathname);
+      if (req.method === 'GET') {
+        if (url.pathname === '/enroll' || url.pathname === '/scan') {
+          return await this.serveStatic(res, `${url.pathname}.html`); // camera-station PWA pages (Phase 7)
+        }
+        return await this.serveStatic(res, url.pathname);
+      }
       res.writeHead(405).end();
     } catch (err) {
       this.deps.logger.warn('http error', { path: url.pathname, err: String(err) });
@@ -191,15 +196,76 @@ export class HttpServer {
       return;
     }
     try {
+      if (pathname === '/api/biometric/capture' && req.method === 'POST') {
+        // raw image body (octet-stream) — measured + extracted in the sidecar, judged here
+        const image = await readRaw(req);
+        const verdict = await svc.captureProbe(image);
+        if (verdict.decision === 'reject') {
+          res.writeHead(409, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, decision: 'reject', reason: verdict.reason, quality: verdict.quality, score: verdict.score }));
+          return;
+        }
+        return await this.json(res, {
+          ok: true,
+          decision: 'accept',
+          templateB64: verdict.template.toString('base64'),
+          quality: verdict.quality,
+          score: verdict.score,
+        });
+      }
+      if (pathname === '/api/biometric/punch' && req.method === 'POST') {
+        // the punch-controller composition point (biometric-core §2): identify → record
+        const body = await readJson<{ templateB64?: string; state?: number }>(req);
+        const template = body.templateB64 ? Buffer.from(body.templateB64, 'base64') : Buffer.alloc(0);
+        const verdict = await svc.identify(template);
+        if (verdict.decision !== 'match') {
+          const at = this.deps.device.now();
+          this.deps.bus.emit('verify', { result: 'fail', userId: verdict.userId ?? '', verifyType: 1, at });
+          return await this.json(res, { result: 'fail', decision: verdict.decision, reason: verdict.reason, score: verdict.score });
+        }
+        if (!this.deps.device.isEnabled()) {
+          res.writeHead(409, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ result: 'fail', error: 'device disabled by admin' }));
+          return;
+        }
+        const user = await this.deps.store.getUserByUserId(String(verdict.userId));
+        if (!user) {
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ result: 'fail', error: 'unknown employee' }));
+          return;
+        }
+        const record = await this.recordPunch(user, { verifyType: 1, state: body.state ?? 0 });
+        this.deps.logger.info('biometric punch accepted', { userId: user.userId, name: user.name, score: verdict.score });
+        return await this.json(res, {
+          result: 'pass',
+          decision: 'match',
+          score: verdict.score,
+          name: user.name,
+          record: serializeRecord(record),
+        });
+      }
       if (pathname === '/api/biometric/enroll' && req.method === 'POST') {
         const body = await readJson<{
           userId?: string;
           finger?: number;
           templateB64?: string;
+          samples?: string[];
           quality?: number;
           source?: 'camera' | 'usb-otg' | 'pc-scanner' | 'imported';
           consent?: boolean;
         }>(req);
+        if (Array.isArray(body.samples) && body.samples.length > 0) {
+          // N-sample ceremony (FR-14) — samples are capture-endpoint outputs
+          const result = await svc.enrollWithSamples({
+            userId: String(body.userId ?? ''),
+            finger: Number(body.finger),
+            consent: body.consent === true,
+            samples: body.samples.map((s) => Buffer.from(String(s), 'base64')),
+            quality: body.quality,
+            source: body.source,
+          });
+          return await this.json(res, { ok: true, ...result });
+        }
         const template = body.templateB64 ? Buffer.from(body.templateB64, 'base64') : Buffer.alloc(0);
         const result = await svc.enroll({
           userId: String(body.userId ?? ''),
@@ -314,6 +380,25 @@ export class HttpServer {
     })();
   }
 
+  /** Attendance write + fan-out shared by the WS trigger and the biometric punch path. */
+  private async recordPunch(
+    user: { uid: number; userId: string; name: string; role: number; card: number; password: string },
+    opts: { verifyType: number; state: number },
+  ): Promise<AttendanceRecord> {
+    const at = this.deps.device.now();
+    const record = await this.deps.store.addAttendance({
+      userSn: user.uid,
+      deviceUserId: user.userId,
+      verifyType: opts.verifyType,
+      state: opts.state,
+      time: at,
+    });
+    this.deps.bus.emit('attendance', record);
+    this.deps.bus.emit('punch', record);
+    this.deps.bus.emit('verify', { result: 'pass', user, userId: user.userId, verifyType: opts.verifyType, at });
+    return record;
+  }
+
   private async punchFromWs(msg: PunchBody): Promise<void> {
     const userId = String(msg.userId ?? '');
     const user = await this.deps.store.getUserByUserId(userId);
@@ -374,4 +459,10 @@ async function readJson<T>(req: http.IncomingMessage): Promise<T> {
   for await (const chunk of req) chunks.push(chunk as Buffer);
   const raw = Buffer.concat(chunks).toString('utf8');
   return (raw ? JSON.parse(raw) : {}) as T;
+}
+
+async function readRaw(req: http.IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks);
 }

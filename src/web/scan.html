@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZKTeco Simulator — Scan Station</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="device">
+  <div class="brand-row"><span class="brand">ZKTECO</span><span class="watermark">SCAN</span></div>
+
+  <div class="screen">
+    <div class="statusbar"><span class="glyph">▂▄▆</span><span class="glyph">✱</span></div>
+
+    <div id="idle">
+      <div class="clock" style="font-size:40px">SCAN</div>
+      <div class="prompt">Place finger on the white surface, then capture</div>
+      <div class="cam-wrap" style="margin:12px 10px 0">
+        <video id="video" autoplay playsinline muted></video>
+        <div class="framing"></div>
+      </div>
+      <button class="station-btn" id="shoot" style="width:calc(100% - 20px);margin:12px 10px 0">CAPTURE &amp; PUNCH</button>
+      <div class="verdict" id="verdict"></div>
+    </div>
+
+    <div class="verify pass" id="verify-pass" hidden>
+      <div class="mark">✔</div>
+      <div class="who" id="pass-name">—</div>
+      <div class="msg">Thank you!</div>
+      <div class="station-note" id="pass-detail"></div>
+    </div>
+    <div class="verify fail" id="verify-fail" hidden>
+      <div class="mark">✘</div>
+      <div class="who" id="fail-who">Not recognized</div>
+      <div class="msg" id="fail-msg">Please try again</div>
+    </div>
+  </div>
+
+  <div class="station-form" style="padding:0 16px 4px">
+    <a class="station-note" href="/" style="display:block;text-align:center">← back to the device face</a>
+  </div>
+
+  <div class="grille" aria-hidden="true"></div>
+</div>
+
+<script src="/scan.js"></script>
+</body>
+</html>

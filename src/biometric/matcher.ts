@@ -6,6 +6,7 @@
  */
 
 import type { Logger } from '../logger.js';
+import type { QualityMetrics } from '../capture/quality.js';
 
 export class MatcherUnavailableError extends Error {
   constructor(message = 'matcher sidecar unreachable') {
@@ -72,13 +73,28 @@ export class MatcherClient {
     }
   }
 
-  /** Raw fingerprint image → ISO 19794-2 template (capture-normalization entry, ADR-009). */
-  async extractImage(image: Buffer, dpi = 500): Promise<Buffer> {
-    const out = await this.json<{ templateB64: string }>(
+  /** Raw fingerprint image → ISO 19794-2 template + capture-quality metrics (ADR-009/FR-16.1). */
+  async extractImage(image: Buffer, dpi = 500): Promise<{ template: Buffer; quality?: QualityMetrics | undefined }> {
+    const out = await this.json<{ templateB64: string; quality?: QualityMetrics }>(
       `/extract?dpi=${dpi}`,
       { method: 'POST', body: image, headers: { 'content-type': 'application/octet-stream' }, timeoutMs: EXTRACT_TIMEOUT_MS },
     );
-    return Buffer.from(out.templateB64, 'base64');
+    return { template: Buffer.from(out.templateB64, 'base64'), quality: out.quality };
+  }
+
+  /** Engine consistency check between two templates (enrollment ceremony, FR-14). */
+  async matchTemplates(a: Buffer, b: Buffer): Promise<number> {
+    const frame = (t: Buffer): Buffer => {
+      const len = Buffer.alloc(4);
+      len.writeUInt32LE(t.length, 0);
+      return len;
+    };
+    const body = Buffer.concat([frame(a), a, frame(b), b]);
+    const out = await this.json<{ score: number }>(
+      '/match',
+      { method: 'POST', body, headers: { 'content-type': 'application/octet-stream' } },
+    );
+    return out.score;
   }
 
   async enrollTemplate(uid: number, finger: number, template: Buffer): Promise<void> {

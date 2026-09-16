@@ -124,6 +124,7 @@ function stubMatcher(state: StubState): MatcherClient {
     clearAll: async () => {
       state.enrolled.length = 0;
     },
+    matchTemplates: async (a: Buffer, b: Buffer) => (a.equals(b) ? 500 : 3), // same bytes = same finger
   } as unknown as MatcherClient;
 }
 
@@ -240,4 +241,47 @@ test('service.purge: wipes encrypted store, matcher copy, and FR-8 wire copies',
   assert.equal(await service.purge(), 1);
   assert.equal(state.enrolled.length, 0);
   assert.equal(await store.getTemplate(1, 0), undefined, 'ISO wire copy purged');
+});
+
+// ---------- enrollment ceremony (Phase 7, FR-14) ----------
+
+test('ceremony: too few samples → 400 with the required count in the message', async () => {
+  const { service } = await newService();
+  await assert.rejects(
+    () =>
+      service.enrollWithSamples({
+        userId: '1001', finger: 0, consent: true, samples: [T('ISO-1'), T('ISO-1')],
+      }),
+    (e: BiometricServiceError) => e.status === 400 && e.message.includes('at least 3'),
+  );
+});
+
+test('ceremony: inconsistent samples → 409 and nothing stored', async () => {
+  const { service, store, state } = await newService();
+  await assert.rejects(
+    () =>
+      service.enrollWithSamples({
+        userId: '1001', finger: 0, consent: true, samples: [T('ISO-1'), T('ISO-2'), T('ISO-1')],
+      }),
+    (e: BiometricServiceError) => e.status === 409,
+  );
+  assert.equal(await store.getTemplate(1, 0), undefined, 'no wire copy on rejected ceremony');
+  assert.equal(state.enrolled.includes('1:0'), false, 'no matcher copy on rejected ceremony');
+});
+
+test('ceremony: consistent samples → enrolled with all pairs recorded', async () => {
+  const { service, store, state } = await newService();
+  const r = await service.enrollWithSamples({
+    userId: '1001',
+    finger: 0,
+    consent: true,
+    samples: [T('ISO-1'), T('ISO-1'), T('ISO-1')],
+    source: 'camera',
+    quality: 80,
+  });
+  assert.equal(r.uid, 1);
+  assert.equal(r.samples, 3);
+  assert.deepEqual(r.consistency, [500, 500, 500]);
+  assert.ok(await store.getTemplate(1, 0), 'wire copy stored');
+  assert.ok(state.enrolled.includes('1:0'), 'matcher copy enrolled');
 });

@@ -36,6 +36,9 @@ export interface Config {
   matchThreshold: number | null;
   matchSeparation: number | null;
   captureSamples: number;
+  qualityMinBrightness: number;
+  qualityMinSharpness: number;
+  qualityMinCoverage: number;
 }
 
 const DEFAULTS: Config = {
@@ -59,6 +62,9 @@ const DEFAULTS: Config = {
   matchThreshold: null,
   matchSeparation: null,
   captureSamples: 3,
+  qualityMinBrightness: 60,
+  qualityMinSharpness: 25,
+  qualityMinCoverage: 18,
 };
 
 /** env var name -> config key */
@@ -83,6 +89,9 @@ const ENV_MAP: Record<string, keyof Config> = {
   ZK_MATCH_THRESHOLD: 'matchThreshold',
   ZK_MATCH_SEPARATION: 'matchSeparation',
   ZK_CAPTURE_SAMPLES: 'captureSamples',
+  ZK_QUALITY_MIN_BRIGHTNESS: 'qualityMinBrightness',
+  ZK_QUALITY_MIN_SHARPNESS: 'qualityMinSharpness',
+  ZK_QUALITY_MIN_COVERAGE: 'qualityMinCoverage',
 };
 
 export class ConfigError extends Error {}
@@ -95,6 +104,9 @@ const INT_KEYS: ReadonlySet<keyof Config> = new Set([
   'matchThreshold',
   'matchSeparation',
   'captureSamples',
+  'qualityMinBrightness',
+  'qualityMinSharpness',
+  'qualityMinCoverage',
 ]);
 
 function coerce(key: keyof Config, raw: string): unknown {
