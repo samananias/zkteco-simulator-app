@@ -29,7 +29,7 @@ if (fingers.some((f) => !Number.isInteger(f) || f < 0 || f > 9)) {
   process.exit(2);
 }
 
-const HTTP = process.env.ZK_HTTP_URL ?? 'http://localhost:3000';
+const HTTP = process.env.ZK_HTTP_URL ?? 'http://localhost:3030';
 const MATCHER = process.env.ZK_MATCHER_URL ?? 'http://127.0.0.1:28090';
 
 async function json(url, init) {

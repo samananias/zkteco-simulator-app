@@ -7,7 +7,7 @@
  * Realtime event rec : 32 B (EF_ATTLOG)
  * Dataset frame      : [u32-LE total bytes of records][records…]
  */
-import { encodeTime, decodeTime } from './timecodec.js';
+import { encodeTime, decodeTime, getZonedTimeFields } from './timecodec.js';
 
 export const USER_RECORD_SIZE = 72;
 export const ATT_RECORD_SIZE = 40;
@@ -21,6 +21,7 @@ export interface UserRecord {
   name: string;
   card: number;
   userId: string;
+  enabled?: boolean;
 }
 
 export interface AttendanceRecord {
@@ -83,12 +84,12 @@ export function decodeUserWrite(payload: Buffer): UserRecord | null {
   return null;
 }
 
-export function encodeAttendance(rec: AttendanceRecord): Buffer {
+export function encodeAttendance(rec: AttendanceRecord, timeZone?: string): Buffer {
   const buf = Buffer.alloc(ATT_RECORD_SIZE);
   buf.writeUInt16LE(rec.userSn & 0xffff, 0);
   writeAscii(buf, 2, 9, rec.deviceUserId);
   buf.writeUInt8(rec.verifyType & 0xff, 26);
-  buf.writeUInt32LE(encodeTime(rec.time) >>> 0, 27);
+  buf.writeUInt32LE(encodeTime(rec.time, timeZone) >>> 0, 27);
   buf.writeUInt8(rec.state & 0xff, 31);
   buf.writeUInt8(0x00, 32);
   buf.writeUInt8(0x00, 33);
@@ -101,27 +102,28 @@ export function encodeAttendance(rec: AttendanceRecord): Buffer {
   return buf;
 }
 
-export function decodeAttendance(buf: Buffer, offset = 0): AttendanceRecord {
+export function decodeAttendance(buf: Buffer, offset = 0, timeZone?: string): AttendanceRecord {
   return {
     userSn: buf.readUInt16LE(offset + 0),
     deviceUserId: readAscii(buf, offset + 2, 9),
     verifyType: buf.readUInt8(offset + 26),
-    time: decodeTime(buf.readUInt32LE(offset + 27)),
+    time: decodeTime(buf.readUInt32LE(offset + 27), timeZone),
     state: buf.readUInt8(offset + 31),
   };
 }
 
 /** Realtime EF_ATTLOG payload (32 B). Time is the 6-byte raw form. */
-export function encodeEventRecord(rec: AttendanceRecord, deviceTime: Date): Buffer {
+export function encodeEventRecord(rec: AttendanceRecord, deviceTime: Date, timeZone?: string): Buffer {
   const buf = Buffer.alloc(EVENT_RECORD_SIZE);
   writeAscii(buf, 0, 9, rec.deviceUserId);
   buf.writeUInt16LE(rec.verifyType & 0xffff, 24);
-  buf.writeUInt8((deviceTime.getFullYear() - 2000) & 0xff, 26);
-  buf.writeUInt8(deviceTime.getMonth() + 1, 27);
-  buf.writeUInt8(deviceTime.getDate(), 28);
-  buf.writeUInt8(deviceTime.getHours(), 29);
-  buf.writeUInt8(deviceTime.getMinutes(), 30);
-  buf.writeUInt8(deviceTime.getSeconds(), 31);
+  const f = getZonedTimeFields(deviceTime, timeZone);
+  buf.writeUInt8((f.year - 2000) & 0xff, 26);
+  buf.writeUInt8(f.month, 27);
+  buf.writeUInt8(f.day, 28);
+  buf.writeUInt8(f.hour, 29);
+  buf.writeUInt8(f.minute, 30);
+  buf.writeUInt8(f.second, 31);
   return buf;
 }
 

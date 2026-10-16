@@ -7,6 +7,7 @@
  */
 
 import http from 'node:http';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +21,7 @@ import { MatcherUnavailableError } from '../biometric/matcher.js';
 import type { DeviceState } from './device.js';
 import type { EventBus } from './events.js';
 import type { AttendanceRecord } from '../protocol/records.js';
+import type { FaultConfig } from './engine.js';
 
 export interface HttpOptions {
   config: Config;
@@ -29,6 +31,9 @@ export interface HttpOptions {
   logger: Logger;
   /** Phase 6+ biometric core — present only when ZK_MATCHER_URL is configured (NFR-12) */
   biometric?: BiometricService | undefined;
+  getFaults?(): FaultConfig;
+  setFault?(f: FaultConfig): void;
+  clearFaults?(): void;
   /** restore the seed state (POST /api/reset) */
   reset(): Promise<void>;
 }
@@ -37,15 +42,50 @@ interface PunchBody {
   userId?: string | number;
   verifyType?: number;
   state?: number;
+  timestamp?: string | number;
   forceFail?: boolean;
+  force?: boolean;
+  cancel?: boolean;
+  cancelled?: boolean;
+  disabled?: boolean;
 }
 
-const WEB_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
+function getWebDir(): string {
+  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const siblingWeb = path.join(currentDir, '..', 'web');
+  if (existsSync(siblingWeb)) return siblingWeb;
+  const srcWeb = path.join(currentDir, '..', '..', 'src', 'web');
+  if (existsSync(srcWeb)) return srcWeb;
+  return siblingWeb;
+}
+
+const WEB_DIR = getWebDir();
+
+const ALLOWED_ORIGINS = new Set([
+  'http://localhost:3030',
+  'http://127.0.0.1:3030',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : []),
+  ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',').map((s) => s.trim()) : []),
+]);
 
 export class HttpServer {
   private readonly server = http.createServer((req, res) => void this.route(req, res));
   private readonly wss = new WebSocketServer({ noServer: true });
+  private readonly rateLimitWindow = new Map<string, number[]>();
   private listening = false;
+
+  private checkRateLimit(ip: string, maxRequests = 40, windowMs = 5000): boolean {
+    const now = Date.now();
+    const timestamps = (this.rateLimitWindow.get(ip) ?? []).filter((t) => now - t < windowMs);
+    if (timestamps.length >= maxRequests) {
+      return false;
+    }
+    timestamps.push(now);
+    this.rateLimitWindow.set(ip, timestamps);
+    return true;
+  }
 
   constructor(private readonly deps: HttpOptions) {}
 
@@ -102,6 +142,44 @@ export class HttpServer {
 
   private async route(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
+
+    // Security: Check origin to block CSRF and cross-origin attacks from untrusted domains
+    const origin = req.headers.origin;
+    if (origin && !ALLOWED_ORIGINS.has(origin)) {
+      this.deps.logger.warn('blocked untrusted cross-origin request', { origin, path: url.pathname });
+      res.writeHead(403, {
+        'content-type': 'application/json',
+        'x-content-type-options': 'nosniff',
+      });
+      res.end(JSON.stringify({ error: 'Forbidden: untrusted origin' }));
+      return;
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'access-control-allow-origin': origin ?? 'http://localhost:3000',
+        'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
+        'access-control-allow-headers': 'Content-Type',
+        'x-content-type-options': 'nosniff',
+      });
+      res.end();
+      return;
+    }
+
+    // Security: Rate-limit sensitive modification endpoints against flood DoS
+    if ((url.pathname === '/api/punch' || url.pathname === '/api/reset') && req.method === 'POST') {
+      const clientIp = req.socket.remoteAddress || '127.0.0.1';
+      if (!this.checkRateLimit(clientIp)) {
+        this.deps.logger.warn('rate limit exceeded for client', { clientIp, path: url.pathname });
+        res.writeHead(429, {
+          'content-type': 'application/json',
+          'x-content-type-options': 'nosniff',
+        });
+        res.end(JSON.stringify({ error: 'Too Many Requests — rate limit exceeded' }));
+        return;
+      }
+    }
+
     try {
       if (url.pathname === '/api/device/state' && req.method === 'GET') {
         return await this.json(res, { ...this.stateBody(), counts: await this.counts() });
@@ -109,10 +187,17 @@ export class HttpServer {
       if (url.pathname === '/api/users' && req.method === 'GET') {
         return await this.json(res, { users: await this.deps.store.getUsers() });
       }
-      if (url.pathname === '/api/attendance' && req.method === 'GET') {
-        const records = await this.deps.store.getAttendance();
-        const desc = [...records].sort((a, b) => b.time.getTime() - a.time.getTime());
-        return await this.json(res, { attendance: desc.map(serializeRecord) });
+      if (url.pathname === '/api/attendance') {
+        if (req.method === 'GET') {
+          const records = await this.deps.store.getAttendance();
+          const desc = [...records].sort((a, b) => b.time.getTime() - a.time.getTime());
+          return await this.json(res, { attendance: desc.map(serializeRecord) });
+        }
+        if (req.method === 'DELETE') {
+          await this.deps.store.clearAttendance();
+          this.deps.bus.emit('users', { reason: 'clear-attlog' });
+          return await this.json(res, { ok: true, cleared: true });
+        }
       }
       if (url.pathname === '/api/punch' && req.method === 'POST') {
         return await this.punch(req, res);
@@ -123,6 +208,50 @@ export class HttpServer {
         this.deps.device.setLcdLines(lines);
         return await this.json(res, { ok: true, lines });
       }
+      if (url.pathname === '/api/clock') {
+        if (req.method === 'GET') {
+          return await this.json(res, {
+            deviceTime: this.deps.device.now().toISOString(),
+            hostTime: new Date().toISOString(),
+            offsetMinutes: this.deps.device.getTimeOffsetMinutes(),
+          });
+        }
+        if (req.method === 'POST') {
+          const body = await readJson<{ offsetMinutes?: number; now?: string }>(req);
+          if (body.offsetMinutes !== undefined) {
+            this.deps.device.setNow(new Date(Date.now() + body.offsetMinutes * 60_000));
+          } else if (body.now) {
+            this.deps.device.setNow(new Date(body.now));
+          }
+          return await this.json(res, {
+            ok: true,
+            deviceTime: this.deps.device.now().toISOString(),
+            offsetMinutes: this.deps.device.getTimeOffsetMinutes(),
+          });
+        }
+      }
+      if (url.pathname === '/api/fault' || url.pathname === '/api/fault/clear') {
+        if (req.method === 'GET') {
+          return await this.json(res, { faults: this.deps.getFaults?.() ?? {} });
+        }
+        if (req.method === 'POST') {
+          if (url.pathname === '/api/fault/clear') {
+            this.deps.clearFaults?.();
+            return await this.json(res, { ok: true, faults: {} });
+          }
+          const body = await readJson<FaultConfig & { clear?: boolean }>(req);
+          if (body.clear) {
+            this.deps.clearFaults?.();
+            return await this.json(res, { ok: true, faults: {} });
+          }
+          this.deps.setFault?.(body);
+          return await this.json(res, { ok: true, faults: this.deps.getFaults?.() ?? {} });
+        }
+        if (req.method === 'DELETE') {
+          this.deps.clearFaults?.();
+          return await this.json(res, { ok: true, faults: {} });
+        }
+      }
       if (url.pathname === '/api/reset' && req.method === 'POST') {
         await this.deps.reset();
         return await this.json(res, { ok: true });
@@ -132,6 +261,17 @@ export class HttpServer {
       }
       if (req.method === 'GET') {
         if (url.pathname === '/enroll' || url.pathname === '/scan' || url.pathname === '/biometric') {
+          if (!this.deps.biometric) {
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(`<!doctype html><html><head><title>Biometrics Disabled</title><link rel="stylesheet" href="/style.css"></head>
+              <body style="padding:40px;font-family:sans-serif;background:#111;color:#eee;text-align:center;">
+                <h2>Biometric Real-Capture Suite Disabled</h2>
+                <p>This virtual terminal operates with synthetic credentials by default (privacy & compliance policy).</p>
+                <p>To enable the SourceAFIS sidecar, launch with <code>ZK_BIOMETRIC_REAL=true</code> and <code>ZK_MATCHER_URL</code> configured.</p>
+                <p style="margin-top:20px;"><a href="/" style="color:#00ff88;text-decoration:none;">&larr; Return to Terminal Face</a></p>
+              </body></html>`);
+            return;
+          }
           return await this.serveStatic(res, `${url.pathname}.html`); // station + admin pages (Phase 7–8)
         }
         return await this.serveStatic(res, url.pathname);
@@ -146,16 +286,52 @@ export class HttpServer {
 
   private async punch(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const body = await readJson<PunchBody>(req);
-    const userId = String(body.userId ?? '');
+    const userId = String(body.userId ?? '').trim();
     const verifyType = body.verifyType ?? 1;
     const state = body.state ?? 0;
-    const at = this.deps.device.now();
+    const at = body.timestamp !== undefined ? new Date(body.timestamp) : this.deps.device.now();
+
+    // Security: Validate userId format (alphanumeric/dashes only, max 24 chars)
+    if (!/^[a-zA-Z0-9_-]{1,24}$/.test(userId)) {
+      res.writeHead(400, { 'content-type': 'application/json', 'x-content-type-options': 'nosniff' });
+      res.end(JSON.stringify({ result: 'fail', reason: 'invalid or malformed userId format' }));
+      return;
+    }
+
+    // Security: Validate timestamp sanity bounds (must be year 2000+ and not >24h in future)
+    const nowMs = Date.now();
+    const atMs = at.getTime();
+    if (isNaN(atMs) || at.getFullYear() < 2000 || atMs > nowMs + 86_400_000) {
+      res.writeHead(400, { 'content-type': 'application/json', 'x-content-type-options': 'nosniff' });
+      res.end(JSON.stringify({ result: 'fail', reason: 'timestamp out of acceptable bounds' }));
+      return;
+    }
+
+    // R1: Capacity limit check
+    const counts = await this.deps.store.counts();
+    const maxLogs = this.deps.config.logCapacity ?? 100000;
+    if (counts.attendance >= maxLogs) {
+      this.deps.bus.emit('verify', { result: 'fail', userId, verifyType, at });
+      res.writeHead(422, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ result: 'fail', reason: 'device log capacity exceeded' }));
+      return;
+    }
+
+    // R2: Cancelled scan
+    if (body.cancel || body.cancelled) {
+      this.deps.bus.emit('verify', { result: 'fail', userId, verifyType, at });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ result: 'fail', reason: 'cancelled scan' }));
+      return;
+    }
 
     if (!this.deps.device.isEnabled()) {
+      this.deps.bus.emit('verify', { result: 'fail', userId, verifyType, at });
       res.writeHead(409, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ result: 'fail', error: 'device disabled by admin' }));
       return;
     }
+
     const user = await this.deps.store.getUserByUserId(userId);
     if (!user || body.forceFail) {
       this.deps.bus.emit('verify', { result: 'fail', userId, verifyType, at });
@@ -163,6 +339,72 @@ export class HttpServer {
       res.end(JSON.stringify({ result: 'fail', reason: user ? 'forced' : 'unknown user' }));
       return;
     }
+
+    // R2: Disabled or inactive user
+    if (user.enabled === false || body.disabled || user.role === -1) {
+      this.deps.bus.emit('verify', { result: 'fail', user, userId: user.userId, verifyType, at });
+      res.writeHead(403, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ result: 'fail', reason: 'user disabled or inactive' }));
+      return;
+    }
+
+    // R2: Unsupported credential/verification type
+    if (![0, 1, 2, 3, 4, 15].includes(verifyType)) {
+      this.deps.bus.emit('verify', { result: 'fail', user, userId: user.userId, verifyType, at });
+      res.writeHead(422, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ result: 'fail', reason: `unsupported verification mode: ${verifyType}` }));
+      return;
+    }
+
+    // Realistic credential verification (M1 / M3 R2)
+    if (verifyType === 1) {
+      const templates = await this.deps.store.getTemplates();
+      const userTemplates = templates.filter((t) => t.uid === user.uid);
+      if (userTemplates.length === 0) {
+        this.deps.bus.emit('verify', { result: 'fail', user, userId: user.userId, verifyType, at });
+        res.writeHead(422, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ result: 'fail', reason: 'no enrolled fingerprint template' }));
+        return;
+      }
+    } else if (verifyType === 2) {
+      if (!user.card || user.card <= 0) {
+        this.deps.bus.emit('verify', { result: 'fail', user, userId: user.userId, verifyType, at });
+        res.writeHead(422, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ result: 'fail', reason: 'no registered card' }));
+        return;
+      }
+    }
+
+    // R3: Device-level duplicate punch suppression window
+    const suppressionSec = this.deps.config.duplicatePunchWindowSeconds ?? 60;
+    if (suppressionSec > 0 && !body.force) {
+      const allLogs = await this.deps.store.getAttendance();
+      const recent = allLogs.find((r) => {
+        if (r.deviceUserId !== user.userId && r.userSn !== user.uid) return false;
+        return Math.abs(at.getTime() - r.time.getTime()) < suppressionSec * 1000;
+      });
+      if (recent) {
+        this.deps.logger.info('duplicate punch suppressed by device', {
+          userId: user.userId,
+          suppressionSec,
+        });
+        this.deps.bus.emit('verify', {
+          result: 'suppressed',
+          user,
+          userId: user.userId,
+          verifyType,
+          at,
+        });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          result: 'suppressed',
+          reason: 'duplicate punch within device suppression window',
+          existingRecord: serializeRecord(recent),
+        }));
+        return;
+      }
+    }
+
     const record = await this.deps.store.addAttendance({
       userSn: user.uid,
       deviceUserId: user.userId,
@@ -192,7 +434,7 @@ export class HttpServer {
     }
     if (!svc) {
       res.writeHead(503, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'biometric features disabled — set ZK_MATCHER_URL (NFR-12)' }));
+      res.end(JSON.stringify({ error: 'biometric features disabled — set ZK_BIOMETRIC_REAL=true (NFR-12)' }));
       return;
     }
     try {
@@ -371,8 +613,13 @@ export class HttpServer {
     return { users: c.users, attendance: c.attendance, templates: c.templates };
   }
 
-  private async json(res: http.ServerResponse, body: unknown): Promise<void> {
-    res.writeHead(200, { 'content-type': 'application/json' });
+  private async json(res: http.ServerResponse, body: unknown, status = 200): Promise<void> {
+    res.writeHead(status, {
+      'content-type': 'application/json',
+      'x-content-type-options': 'nosniff',
+      'x-frame-options': 'SAMEORIGIN',
+      'referrer-policy': 'strict-origin-when-cross-origin',
+    });
     res.end(JSON.stringify(body, null, 2));
   }
 
@@ -489,11 +736,24 @@ function serializeRecord(rec: AttendanceRecord): Record<string, unknown> {
   };
 }
 
-async function readJson<T>(req: http.IncomingMessage): Promise<T> {
+async function readJson<T>(req: http.IncomingMessage, maxBytes = 64 * 1024): Promise<T> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    totalBytes += buf.length;
+    if (totalBytes > maxBytes) {
+      throw new Error('Payload Too Large: exceeded 64KB ceiling');
+    }
+    chunks.push(buf);
+  }
   const raw = Buffer.concat(chunks).toString('utf8');
-  return (raw ? JSON.parse(raw) : {}) as T;
+  if (!raw.trim()) return {} as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error('Malformed JSON payload');
+  }
 }
 
 async function readRaw(req: http.IncomingMessage): Promise<Buffer> {

@@ -7,7 +7,7 @@
 const userId = process.argv[2] ?? '1';
 const verifyType = Number.parseInt(process.argv[3] ?? '1', 10);
 const state = Number.parseInt(process.argv[4] ?? '0', 10);
-const base = process.env.ZK_HTTP_URL ?? 'http://localhost:3000';
+const base = process.env.ZK_HTTP_URL ?? 'http://localhost:3030';
 
 const res = await fetch(`${base}/api/punch`, {
   method: 'POST',

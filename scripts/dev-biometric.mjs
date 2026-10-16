@@ -65,7 +65,7 @@ const sim = spawn(
   ['--import', 'tsx', 'src/index.ts', ...SIM_ARGS],
   {
     cwd: ROOT,
-    env: { ...process.env, ZK_MATCHER_URL: `http://127.0.0.1:${SIDECAR_PORT}` },
+    env: { ...process.env, ZK_BIOMETRIC_REAL: 'true', ZK_MATCHER_URL: `http://127.0.0.1:${SIDECAR_PORT}` },
     stdio: 'inherit',
   },
 );

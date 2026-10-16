@@ -7,11 +7,12 @@ import { EventEmitter } from 'node:events';
 import type { AttendanceRecord, UserRecord } from '../protocol/records.js';
 
 export interface VerifyEvent {
-  result: 'pass' | 'fail';
+  result: 'pass' | 'fail' | 'suppressed';
   user?: UserRecord;
   userId: string;
   verifyType: number;
   at: Date;
+  reason?: string;
 }
 
 export interface LcdEvent {
@@ -25,7 +26,7 @@ export interface DeviceStateEvent {
 }
 
 export interface StoreChangedEvent {
-  reason: 'user-write' | 'user-delete' | 'clear-attlog' | 'clear-data' | 'option-write';
+  reason: 'user-write' | 'user-delete' | 'clear-attlog' | 'clear-data' | 'clear-admin' | 'option-write';
 }
 
 export interface SimulatorEvents {

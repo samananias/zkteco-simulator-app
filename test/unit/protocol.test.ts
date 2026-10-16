@@ -157,9 +157,11 @@ test('template entry: 6-byte header then blob (FR-8)', () => {
 test('configuration: defaults, env, CLI, validation', () => {
   const cfg = loadConfig([], {});
   assert.equal(cfg.tcpPort, 4370);
-  assert.equal(cfg.httpPort, 3000);
+  assert.equal(cfg.httpPort, 3030);
   assert.equal(cfg.commKey, 0); // BITS backend default — auth disabled
   assert.equal(cfg.readMode, 'direct');
+  assert.equal(cfg.biometricReal, false);
+  assert.equal(cfg.timeZone, 'Asia/Manila');
 
   const env = loadConfig([], { ZK_TCP_PORT: '4371', ZK_LOG_LEVEL: 'debug' });
   assert.equal(env.tcpPort, 4371);

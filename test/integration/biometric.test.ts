@@ -83,6 +83,7 @@ test.before(async () => {
       '--zk-log-level', 'warn',
       '--zk-seed', 'standard',
       '--zk-matcher-url', B,
+      '--zk-biometric-real', 'true',
       '--zk-biometric-data-dir', path.join(bioDir, 'data'),
       '--zk-biometric-key', TEST_KEY,
     ]),

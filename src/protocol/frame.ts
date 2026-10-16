@@ -73,8 +73,13 @@ export function encodeFrame(options: EncodeOptions): Buffer {
  */
 export class FrameParser {
   private buffer: Buffer = Buffer.alloc(0);
+  private static readonly MAX_BUFFER_BYTES = 1024 * 1024; // 1MB buffer ceiling against heap exhaustion
 
   push(chunk: Buffer): Frame[] {
+    if (this.buffer.length + chunk.length > FrameParser.MAX_BUFFER_BYTES) {
+      // Security: Drop accumulated unparseable stream to prevent buffer memory exhaustion
+      this.buffer = Buffer.alloc(0);
+    }
     this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
     const frames: Frame[] = [];
 

@@ -15,6 +15,7 @@ export type StoreKind = 'memory' | 'sqlite';
 export interface Config {
   /** Protocol engine TCP port — the "device" port BITS connects to. */
   tcpPort: number;
+  tcpHost: string;
   /** Web UI + REST + WebSocket port. */
   httpPort: number;
   httpHost: string;
@@ -46,19 +47,36 @@ export interface Config {
   retentionDays: number;
   /** Phase 8 — station identity stamped into consent/enrollment records (multi-station) */
   stationId: string;
+  timeZone: string;
+  biometricReal: boolean;
+  enrollDelayMs: number;
+  /** Milestone 3: Realism (R1) — capacity limits */
+  userCapacity: number;
+  templateCapacity: number;
+  logCapacity: number;
+  /** Milestone 3: Realism (R3) — on-device duplicate punch suppression window (seconds) */
+  duplicatePunchWindowSeconds: number;
 }
 
 const DEFAULTS: Config = {
   tcpPort: 4370,
-  httpPort: 3000,
-  httpHost: '0.0.0.0',
+  tcpHost: '127.0.0.1',
+  httpPort: 3030,
+  httpHost: '127.0.0.1',
   commKey: 0,
   checksumVariant: 'classic',
   checksumStrict: false,
   readMode: 'direct',
-  deviceName: 'ACME HQ — Main Door',
-  serial: 'CJ7X202660399',
+  deviceName: 'BITS-VIRTUAL-K14 (Virtual Terminal)',
+  serial: 'VIRT-K14-2026',
   timeOffsetMin: 0,
+  timeZone: 'Asia/Manila',
+  biometricReal: false,
+  enrollDelayMs: 1500,
+  userCapacity: 3000,
+  templateCapacity: 3000,
+  logCapacity: 100000,
+  duplicatePunchWindowSeconds: 60,
   seed: 'standard',
   store: 'memory',
   sqlitePath: './data/device.sqlite',
@@ -80,6 +98,7 @@ const DEFAULTS: Config = {
 /** env var name -> config key */
 const ENV_MAP: Record<string, keyof Config> = {
   ZK_TCP_PORT: 'tcpPort',
+  ZK_TCP_HOST: 'tcpHost',
   ZK_HTTP_PORT: 'httpPort',
   ZK_HTTP_HOST: 'httpHost',
   ZK_COMM_KEY: 'commKey',
@@ -89,6 +108,14 @@ const ENV_MAP: Record<string, keyof Config> = {
   ZK_DEVICE_NAME: 'deviceName',
   ZK_SERIAL: 'serial',
   ZK_TIME_OFFSET_MIN: 'timeOffsetMin',
+  ZK_TIME_ZONE: 'timeZone',
+  ZK_TZ: 'timeZone',
+  ZK_BIOMETRIC_REAL: 'biometricReal',
+  ZK_ENROLL_DELAY_MS: 'enrollDelayMs',
+  ZK_USER_CAPACITY: 'userCapacity',
+  ZK_TEMPLATE_CAPACITY: 'templateCapacity',
+  ZK_LOG_CAPACITY: 'logCapacity',
+  ZK_DUPLICATE_PUNCH_WINDOW: 'duplicatePunchWindowSeconds',
   ZK_SEED: 'seed',
   ZK_STORE: 'store',
   ZK_SQLITE_PATH: 'sqlitePath',
@@ -114,6 +141,11 @@ const INT_KEYS: ReadonlySet<keyof Config> = new Set([
   'httpPort',
   'commKey',
   'timeOffsetMin',
+  'enrollDelayMs',
+  'userCapacity',
+  'templateCapacity',
+  'logCapacity',
+  'duplicatePunchWindowSeconds',
   'matchThreshold',
   'matchSeparation',
   'captureSamples',
@@ -135,7 +167,7 @@ function coerce(key: keyof Config, raw: string): unknown {
     }
     return n;
   }
-  if (key === 'checksumStrict') {
+  if (key === 'checksumStrict' || key === 'biometricReal') {
     if (raw === 'true' || raw === '1') return true;
     if (raw === 'false' || raw === '0') return false;
     throw new ConfigError(`${key}: expected true|false, received "${raw}"`);
@@ -162,7 +194,8 @@ function coerce(key: keyof Config, raw: string): unknown {
 /** CLI flag name (kebab) -> config key */
 function flagKey(flag: string): keyof Config | null {
   const kebab = flag.replace(/^--/, '').replace(/^zk-/, '');
-  const camel = kebab.replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase());
+  const camel = kebab.replace(/-([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+  if (camel.toLowerCase() === 'duplicatepunchwindow') return 'duplicatePunchWindowSeconds';
   for (const key of Object.keys(DEFAULTS) as (keyof Config)[]) {
     if (key.toLowerCase() === camel.toLowerCase()) return key;
   }

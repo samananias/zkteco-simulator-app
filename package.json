@@ -9,9 +9,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --env-file=.env src/index.ts",
     "dev:biometric": "node scripts/dev-biometric.mjs",
-    "build": "tsc",
+    "build": "tsc && node -e \"const fs = require('fs'); fs.cpSync('src/web', 'dist/web', { recursive: true });\"",
     "start": "node dist/index.js",
     "test": "node --import tsx --test test/unit/*.test.ts test/integration/*.test.ts",
     "test:unit": "node --import tsx --test test/unit/*.test.ts",

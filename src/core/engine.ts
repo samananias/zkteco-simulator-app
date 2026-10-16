@@ -30,6 +30,7 @@ import {
   type AttendanceRecord,
 } from '../protocol/records.js';
 import { decodeTime, encodeTime } from '../protocol/timecodec.js';
+import { syntheticTemplate } from '../store/seed.js';
 import type { Store } from '../store/types.js';
 import type { DeviceState } from './device.js';
 import type { EventBus } from './events.js';
@@ -63,6 +64,7 @@ interface Session {
   eventFlags: number; // CMD_REG_EVENT payload
   pendingWrite: { size: number; chunks: Buffer[] };
   pendingDataset: Buffer | null; // chunked read mode (ADR-004)
+  pendingEnrollmentTimer?: ReturnType<typeof setTimeout> | null;
   closed: boolean;
 }
 
@@ -77,23 +79,50 @@ interface ReplySpec {
   closeAfter?: boolean;
 }
 
+export interface FaultConfig {
+  /** If true, incoming TCP connections are immediately closed or rejected. */
+  refuseConnections?: boolean;
+  /** Artificial latency added to every TCP frame reply (in ms). */
+  latencyMs?: number;
+  /** Drop the connection on specific command without replying. */
+  dropOnCommand?: number;
+  /** Return CMD_ACK_ERROR for specific command */
+  errorOnCommand?: number;
+}
+
 export interface EngineOptions {
   config: Config;
   store: Store;
   device: DeviceState;
   bus: EventBus;
   logger: Logger;
+  pendingEnrollmentTimers?: Set<ReturnType<typeof setTimeout>>;
 }
 
 export class ProtocolEngine {
   private readonly server = net.createServer();
   private readonly sessions = new Map<number, Session>();
+  private readonly pendingEnrollments = new Set<ReturnType<typeof setTimeout>>();
+  private faultConfig: FaultConfig = {};
   private nextSessionKey = 30646; // plausible-looking device session ids
   private nextSessionId = 1;
   private listening = false;
   private punchListener: ((rec: AttendanceRecord) => void) | null = null;
 
+  getFaults(): FaultConfig {
+    return { ...this.faultConfig };
+  }
+
+  setFault(f: FaultConfig): void {
+    this.faultConfig = { ...this.faultConfig, ...f };
+  }
+
+  clearFaults(): void {
+    this.faultConfig = {};
+  }
+
   constructor(private readonly opts: EngineOptions) {
+    this.opts.pendingEnrollmentTimers = this.pendingEnrollments;
     this.server.on('connection', (socket) => this.onConnection(socket));
     this.server.on('error', (err) => this.opts.logger.error('tcp server error', { err: String(err) }));
   }
@@ -102,10 +131,11 @@ export class ProtocolEngine {
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error) => reject(err);
       this.server.once('error', onError);
-      this.server.listen(this.opts.config.tcpPort, '0.0.0.0', () => {
+      this.server.listen(this.opts.config.tcpPort, this.opts.config.tcpHost ?? '127.0.0.1', () => {
         this.server.removeListener('error', onError);
         this.listening = true;
         this.opts.logger.info('protocol engine listening', {
+          host: this.opts.config.tcpHost ?? '127.0.0.1',
           port: (this.server.address() as net.AddressInfo).port,
         });
         resolve();
@@ -117,7 +147,12 @@ export class ProtocolEngine {
 
   async stop(): Promise<void> {
     if (this.punchListener) this.opts.bus.off('punch', this.punchListener);
+    for (const t of this.pendingEnrollments) {
+      clearTimeout(t);
+    }
+    this.pendingEnrollments.clear();
     for (const session of this.sessions.values()) {
+      session.pendingEnrollmentTimer = null;
       session.closed = true;
       session.socket.destroy();
     }
@@ -139,7 +174,32 @@ export class ProtocolEngine {
   // ------------------------------------------------------------ connections
 
   private onConnection(socket: net.Socket): void {
+    if (this.faultConfig.refuseConnections) {
+      this.opts.logger.warn('connection refused by fault injection', {
+        peer: `${socket.remoteAddress}:${socket.remotePort}`,
+      });
+      socket.destroy();
+      return;
+    }
+
+    // Security: Guard against TCP socket exhaustion attacks
+    const MAX_CONCURRENT_SESSIONS = 24;
+    if (this.sessions.size >= MAX_CONCURRENT_SESSIONS) {
+      this.opts.logger.warn('connection rejected — max concurrent sessions exceeded', {
+        peer: `${socket.remoteAddress}:${socket.remotePort}`,
+        activeSessions: this.sessions.size,
+      });
+      socket.destroy();
+      return;
+    }
+
     socket.setNoDelay(true);
+    // Security: 60-second idle timeout to clean up abandoned TCP connections
+    socket.setTimeout(60000, () => {
+      this.opts.logger.debug('session timed out due to inactivity', { peer: `${socket.remoteAddress}:${socket.remotePort}` });
+      socket.destroy();
+    });
+
     const session: Session = {
       id: this.nextSessionId++,
       socket,
@@ -170,6 +230,8 @@ export class ProtocolEngine {
       this.opts.logger.debug('session socket error', { session: session.id, err: String(err) }),
     );
     socket.on('close', () => {
+      // Note: do not cancel pendingEnrollmentTimer on socket disconnect.
+      // Physical terminals perform enrollment on-device independently of the TCP connection.
       session.closed = true;
       this.sessions.delete(session.id);
       this.opts.logger.info('session closed', { session: session.id });
@@ -200,12 +262,27 @@ export class ProtocolEngine {
       }
     }
 
+    if (this.faultConfig.dropOnCommand === frame.command) {
+      this.opts.logger.warn('dropping connection on command by fault injection', {
+        session: session.id,
+        cmd: frame.command,
+      });
+      session.closed = true;
+      session.socket.destroy();
+      return;
+    }
+
     let reply: ReplySpec | null = null;
     try {
-      reply =
-        (await handleCore(this.opts, session, frame)) ??
-        (await handleData(this.opts, session, frame)) ??
-        (await handleUsers(this.opts, session, frame));
+      if (this.faultConfig.errorOnCommand === frame.command) {
+        this.opts.logger.warn('reply error injected on command', { session: session.id, cmd: frame.command });
+        reply = { command: COMMANDS.CMD_ACK_ERROR };
+      } else {
+        reply =
+          (await handleCore(this.opts, session, frame)) ??
+          (await handleData(this.opts, session, frame)) ??
+          (await handleUsers(this.opts, session, frame));
+      }
     } catch (err) {
       logger.error('handler failure', { session: session.id, cmd: frame.command, err: String(err) });
       reply = { command: COMMANDS.CMD_ACK_ERROR };
@@ -214,6 +291,19 @@ export class ProtocolEngine {
       logger.debug('unhandled command — ACK_UNKNOWN', { session: session.id, cmd: frame.command });
       reply = { command: COMMANDS.CMD_ACK_UNKNOWN };
     }
+
+    const latency = this.faultConfig.latencyMs ?? 0;
+    if (latency > 0) {
+      setTimeout(() => {
+        if (!reply!.silent && !session.closed) this.writeReply(session, frame, reply!);
+        if (reply!.closeAfter && !session.closed) {
+          session.closed = true;
+          setTimeout(() => session.socket.end(), 50);
+        }
+      }, latency);
+      return;
+    }
+
     if (!reply.silent && !session.closed) this.writeReply(session, frame, reply);
     if (reply.closeAfter && !session.closed) {
       session.closed = true;
@@ -245,7 +335,7 @@ export class ProtocolEngine {
         command: COMMANDS.CMD_REG_EVENT,
         sessionId: EVENTS.EF_ATTLOG,
         replyId: 0,
-        payload: encodeEventRecord(rec, this.opts.device.now()),
+        payload: encodeEventRecord(rec, this.opts.device.now(), this.opts.config.timeZone),
         checksumVariant: this.opts.config.checksumVariant as ChecksumVariant,
       });
       this.writeRaw(session, packet);
@@ -316,22 +406,37 @@ async function handleCore(deps: Deps, session: Session, frame: Frame): Promise<M
       logger.info('restart requested — closing session', { session: session.id });
       return { ...ack, closeAfter: true };
     case C.CMD_GET_TIME:
-      return { command: C.CMD_ACK_OK, payload: u32(encodeTime(device.now())) };
+      return { command: C.CMD_ACK_OK, payload: u32(encodeTime(device.now(), config.timeZone)) };
     case C.CMD_SET_TIME:
-      if (payload.length >= 4) device.setNow(decodeTime(payload.readUInt32LE(0)));
+      if (payload.length >= 4) device.setNow(decodeTime(payload.readUInt32LE(0), config.timeZone));
       return ack;
     case C.CMD_GET_VERSION:
-      return { command: C.CMD_ACK_OK, payload: Buffer.from('ALT-FA700 8.0.4.1-20200213\0', 'ascii') };
+      return { command: C.CMD_ACK_OK, payload: Buffer.from('BITS-VIRTUAL-K14 8.0.4.1-2026\0', 'ascii') };
     case C.CMD_CHANGE_SPEED:
       return ack;
     case C.CMD_GET_FREE_SIZES: {
       const counts = await store.counts();
-      // getInfo() reads the RESOLVED FRAME buffer at 24/40/72 — the frame header
-      // occupies 8 bytes, so the payload offsets are 16/32/64.
-      const buf = Buffer.alloc(72);
-      buf.writeUInt32LE(counts.users, 16); // userCounts
-      buf.writeUInt32LE(counts.attendance, 32); // logCounts
-      buf.writeUInt32LE(100000, 64); // logCapacity
+      const userCap = config.userCapacity ?? 3000;
+      const tplCap = config.templateCapacity ?? 3000;
+      const logCap = config.logCapacity ?? 100000;
+      // node-zklib getInfo() reads TCP frame offsets 24/40/72 (payload offsets 16/32/64).
+      // pyzk read_sizes() unpacks '20i' from payload:
+      // index 4 (16) = users, index 6 (24) = fingers, index 8 (32) = records,
+      // index 14 (56) = fingers_cap, index 15 (60) = users_cap, index 16 (64) = rec_cap,
+      // index 17 (68) = fingers_av, index 18 (72) = users_av, index 19 (76) = rec_av.
+      const buf = Buffer.alloc(80);
+      buf.writeUInt32LE(counts.users, 16); // index 4: users (frame offset 24)
+      buf.writeUInt32LE(counts.templates, 20); // index 5: tpl
+      buf.writeUInt32LE(counts.templates, 24); // index 6: fingers (pyzk)
+      buf.writeUInt32LE(counts.attendance, 32); // index 8: records/logs (frame offset 40)
+      buf.writeUInt32LE(userCap, 48); // index 12: user cap
+      buf.writeUInt32LE(tplCap, 52); // index 13: fp cap
+      buf.writeUInt32LE(tplCap, 56); // index 14: fingers_cap (pyzk)
+      buf.writeUInt32LE(userCap, 60); // index 15: users_cap (pyzk)
+      buf.writeUInt32LE(logCap, 64); // index 16: logCapacity (frame offset 72)
+      buf.writeUInt32LE(Math.max(0, tplCap - counts.templates), 68); // index 17: fingers_av
+      buf.writeUInt32LE(Math.max(0, userCap - counts.users), 72); // index 18: users_av
+      buf.writeUInt32LE(Math.max(0, logCap - counts.attendance), 76); // index 19: rec_av
       return { command: C.CMD_ACK_OK, payload: buf };
     }
     case C.CMD_STATE_RRQ:
@@ -379,11 +484,14 @@ function depsNextSessionKey(): number {
 
 async function lookupOption(deps: Deps, key: string): Promise<string | undefined> {
   const identity = deps.device.getIdentity();
-  if (key === '~DeviceName') return identity.name;
-  if (key === '~SerialNumber') return identity.serial;
-  if (key === '~Platform') return identity.platform;
+  if (key === '~DeviceName' || key === 'DeviceName') return identity.name;
+  if (key === '~SerialNumber' || key === '~SerialNumberLinux') return identity.serial;
+  if (key === '~Platform' || key === 'Platform') return identity.platform;
   if (key === '~ZKFPVersion') return identity.fpVersion;
   if (key === '~OS') return identity.osVersion;
+  if (key === '~MaxUserCount') return String(deps.config.userCapacity ?? 3000);
+  if (key === '~MaxAttLogCount') return String(deps.config.logCapacity ?? 100000);
+  if (key === '~MaxFingerCount') return String(deps.config.templateCapacity ?? 3000);
   return deps.store.getOption(key);
 }
 
@@ -416,7 +524,7 @@ async function handleData(deps: Deps, session: Session, frame: Frame): Promise<M
         what = 'users';
       } else if (payload.length >= 2 && payload[1] === 0x0d) {
         const records = await store.getAttendance();
-        dataset = encodeDataset(records.map(encodeAttendance));
+        dataset = encodeDataset(records.map((r) => encodeAttendance(r, config.timeZone)));
         what = 'attendance';
       } else {
         logger.warn('unrecognised DATA_WRRQ request', { session: session.id, hex: payload.toString('hex') });
@@ -492,6 +600,17 @@ async function handleData(deps: Deps, session: Session, frame: Frame): Promise<M
       const flag = payload.readUInt8(3);
       const blob = Buffer.concat(session.pendingWrite.chunks);
       session.pendingWrite = { size: 0, chunks: [] };
+      const existing = await store.getTemplate(uid, finger);
+      if (!existing) {
+        const counts = await store.counts();
+        const maxTemplates = config.templateCapacity ?? 3000;
+        if (counts.templates >= maxTemplates) {
+          logger.warn('template write rejected: capacity exceeded', {
+            session: session.id, count: counts.templates, max: maxTemplates,
+          });
+          return err;
+        }
+      }
       await store.saveTemplate({ uid, finger, flag, template: blob, format: 'synthetic' });
       deps.bus.emit('template', { uid, finger, action: 'write' });
       logger.info('template written', { session: session.id, uid, finger, bytes: blob.length });
@@ -510,7 +629,7 @@ async function handleData(deps: Deps, session: Session, frame: Frame): Promise<M
 /** Users, templates housekeeping, and cosmetic ACK-only commands. */
 async function handleUsers(deps: Deps, session: Session, frame: Frame): Promise<MaybeReply> {
   const C = COMMANDS;
-  const { store, bus, logger } = deps;
+  const { store, bus, logger, config } = deps;
   const payload = frame.payload;
   const ack: ReplySpec = { command: C.CMD_ACK_OK };
   const err: ReplySpec = { command: C.CMD_ACK_ERROR };
@@ -519,6 +638,17 @@ async function handleUsers(deps: Deps, session: Session, frame: Frame): Promise<
     case C.CMD_USER_WRQ: {
       const user = decodeUserWrite(payload);
       if (!user) return err;
+      const existing = await store.getUser(user.uid);
+      if (!existing) {
+        const counts = await store.counts();
+        const maxUsers = config.userCapacity ?? 3000;
+        if (counts.users >= maxUsers) {
+          logger.warn('user write rejected: capacity exceeded', {
+            session: session.id, count: counts.users, max: maxUsers,
+          });
+          return err;
+        }
+      }
       await store.upsertUser(user);
       bus.emit('users', { reason: 'user-write' });
       logger.info('user written', {
@@ -563,15 +693,109 @@ async function handleUsers(deps: Deps, session: Session, frame: Frame): Promise<
       logger.info('data cleared', { session: session.id, type });
       return ack;
     }
-    case C.CMD_STARTENROLL:
+    case C.CMD_STARTENROLL: {
+      // TCP Format (from pyzk / BITS zk-driver):
+      //   pack('<24sbb', visibleUserId, fingerIndex, overwriteFlag)
+      //   24 bytes: visible userId string
+      //   1 byte:   finger index (0-9)
+      //   1 byte:   overwrite flag (1 = allow overwrite)
+      if (payload.length < 25) return err;
+      const visibleId = ascii(payload.subarray(0, 24)).trim();
+      const finger = payload.readUInt8(24);
+      const overwrite = payload.length >= 26 ? payload.readUInt8(25) : 1;
+
+      if (finger < 0 || finger > 9) {
+        logger.warn('STARTENROLL rejected: invalid finger slot', { session: session.id, finger });
+        return err;
+      }
+
+      let user = await store.getUserByUserId(visibleId);
+      if (!user) {
+        const parsedUid = Number.parseInt(visibleId, 10);
+        if (!Number.isNaN(parsedUid)) {
+          user = await store.getUser(parsedUid);
+        }
+      }
+
+      if (!user) {
+        logger.warn('STARTENROLL rejected: user not found on device', { session: session.id, visibleId });
+        return err;
+      }
+
+      const existing = await store.getTemplate(user.uid, finger);
+      if (existing && overwrite !== 1) {
+        logger.warn('STARTENROLL rejected: slot occupied and overwrite disabled', {
+          session: session.id,
+          uid: user.uid,
+          finger,
+        });
+        return err;
+      }
+
+      if (!existing) {
+        const counts = await store.counts();
+        const maxTemplates = config.templateCapacity ?? 3000;
+        if (counts.templates >= maxTemplates) {
+          logger.warn('STARTENROLL rejected: template capacity exceeded', {
+            session: session.id, count: counts.templates, max: maxTemplates,
+          });
+          return err;
+        }
+      }
+
+      if (session.pendingEnrollmentTimer) {
+        clearTimeout(session.pendingEnrollmentTimer);
+        deps.pendingEnrollmentTimers?.delete(session.pendingEnrollmentTimer);
+        session.pendingEnrollmentTimer = null;
+      }
+
+      const uid = user.uid;
+      const delayMs = config.enrollDelayMs ?? 1500;
+      const timer = setTimeout(async () => {
+        session.pendingEnrollmentTimer = null;
+        deps.pendingEnrollmentTimers?.delete(timer);
+        try {
+          const blob = syntheticTemplate(uid, finger);
+          await store.saveTemplate({ uid, finger, flag: 1, template: blob, format: 'synthetic' });
+          bus.emit('template', { uid, finger, action: 'write' });
+          logger.info('synthetic enrollment completed', { session: session.id, uid, finger, bytes: blob.length });
+        } catch (e) {
+          logger.error('failed to save synthetic template', { err: String(e) });
+        }
+      }, delayMs);
+      session.pendingEnrollmentTimer = timer;
+      deps.pendingEnrollmentTimers?.add(timer);
+
+      logger.info('synthetic enrollment started', { session: session.id, uid, finger, delayMs });
+      return ack;
+    }
+    case C.CMD_CANCELCAPTURE: {
+      if (session.pendingEnrollmentTimer) {
+        clearTimeout(session.pendingEnrollmentTimer);
+        deps.pendingEnrollmentTimers?.delete(session.pendingEnrollmentTimer);
+        session.pendingEnrollmentTimer = null;
+        logger.info('pending enrollment cancelled', { session: session.id });
+      }
+      return ack;
+    }
     case C.CMD_STARTVERIFY:
-    case C.CMD_CANCELCAPTURE:
-      // acknowledged now; the real enrollment ceremony is wired in Phase 6 (FR-14)
       return ack;
     case C.CMD_REFRESHDATA:
     case C.CMD_REFRESHOPTION:
     case C.CMD_UNLOCK:
-    case C.CMD_CLEAR_ADMIN:
+    case C.CMD_CLEAR_ADMIN: {
+      const users = await store.getUsers();
+      let cleared = 0;
+      for (const u of users) {
+        if ((u.role ?? 0) > 0) {
+          await store.upsertUser({ ...u, role: 0 });
+          cleared++;
+        }
+      }
+      bus.emit('users', { reason: 'clear-admin' });
+      logger.info('admins cleared', { session: session.id, cleared });
+      return ack;
+    }
     case C.CMD_GET_PINWIDTH:
     case C.CMD_ENABLE_CLOCK:
     case C.CMD_CAPTUREFINGER:

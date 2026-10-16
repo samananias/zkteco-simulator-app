@@ -3,71 +3,378 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ZKTeco Simulator — Device Face</title>
-<link rel="stylesheet" href="/style.css">
+<title>ZKTeco Simulator — K14 Firmware OS</title>
+<link rel="stylesheet" href="/style.css?v=4">
 </head>
 <body>
-<div class="device">
-  <div class="brand-row"><span class="brand">ZKTECO</span><span class="watermark">SIMULATOR</span></div>
 
-  <div class="screen">
-    <div class="statusbar">
-      <span class="glyph" id="glyph-net">▂▄▆</span>
-      <span class="glyph" id="glyph-alarm">✱</span>
-      <span class="glyph" id="glyph-lock">🔒</span>
+<div class="layout-container">
+  <!-- LEFT: ZKTeco Device Face & Embedded Firmware OS -->
+  <div class="device">
+    <div class="brand-row">
+      <span class="brand">ZKTECO</span>
+      <span class="watermark">K14 STANDALONE</span>
     </div>
 
-    <div class="clock" id="clock">--:--:--</div>
-    <div class="date" id="date">----‑--‑--</div>
-    <div class="devname" id="devname">…</div>
+    <!-- 2.8" Color LCD Screen with Authentic TFT Bezel -->
+    <div class="screen" id="screen">
+      <!-- Universal Top Status Bar -->
+      <div class="statusbar" id="statusbar">
+        <div class="status-left">
+          <button type="button" class="punch-state-pill state-in" id="state-toggle" title="Click to toggle Check-In / Check-Out">
+            <span class="state-arrow">➜]</span>
+            <span class="state-label" id="state-label">Check-In</span>
+          </button>
+        </div>
+        <div class="status-glyphs">
+          <span class="glyph glyph-net" id="glyph-net" title="TCP :4370 Connected">▂▄▆</span>
+          <span class="glyph" id="glyph-cloud" title="BITS Live Connection">☁</span>
+          <span class="glyph" id="glyph-alarm" title="Scheduled Bell">🔔</span>
+          <span class="glyph" id="glyph-batt" title="Backup Battery: 100%">🔋</span>
+        </div>
+      </div>
 
-    <div class="prompt" id="prompt">Please place finger</div>
+      <!-- VIEW 1: AUTHENTIC IDLE STANDBY (ZKTeco Home Wallpaper) -->
+      <div class="os-view" id="view-idle">
+        <div class="idle-content">
+          <div class="clock" id="clock">--:--:--</div>
+          <div class="date-row">
+            <span id="date">----‑--‑--</span>
+            <span class="day-badge" id="day-name">---</span>
+          </div>
+          <div class="devname-badge">
+            <span class="dev-dot"></span>
+            <span id="devname">ZKTECO K14</span>
+          </div>
 
-    <div class="lcd" id="lcd" hidden></div>
+          <!-- Central Optical Biometric Glow & Prompt -->
+          <div class="bio-prompt-wrap">
+            <div class="bio-fingerprint-glow">
+              <span class="bio-icon">🖐</span>
+            </div>
+            <div class="prompt" id="prompt">Please place finger</div>
+          </div>
+        </div>
 
-    <div class="banner" id="banner" hidden>Device disabled by admin</div>
+        <!-- Bottom Attendance Mode Shortcuts -->
+        <div class="idle-footer-bar">
+          <button type="button" class="f-key active" data-state="0" id="fkey-in">F1: IN</button>
+          <button type="button" class="f-key" data-state="1" id="fkey-out">F2: OUT</button>
+          <button type="button" class="f-key" data-state="2" id="fkey-bout">F3: B-OUT</button>
+          <button type="button" class="f-key" data-state="3" id="fkey-bin">F4: B-IN</button>
+        </div>
 
-    <div class="menu" id="menu" hidden>
-      <a class="tile" href="/scan">🖐<span>Scan</span></a>
-      <a class="tile" href="/enroll">📝<span>Enroll</span></a>
-      <a class="tile" href="/biometric">🔐<span>Bio Admin</span></a>
-      <div class="tile">👥<span>User Mgmt</span></div>
-      <div class="tile">📅<span>Att Search</span></div>
+        <!-- Floating PIN Entry Modal (Appears when typing digits on standby) -->
+        <div class="pin-modal-dialog" id="pin-modal" hidden>
+          <div class="dialog-box">
+            <div class="dialog-header">
+              <span>🔑 Input PIN</span>
+            </div>
+            <div class="dialog-body">
+              <div class="pin-digits-box" id="pin-modal-display">_</div>
+              <div class="dialog-hint">Press OK to Verify</div>
+            </div>
+            <div class="dialog-footer">
+              <span>OK: Verify · ESC: Cancel</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="lcd" id="lcd" hidden></div>
+        <div class="banner" id="banner" hidden>Device disabled by admin</div>
+      </div>
+
+      <!-- VIEW 2: ADMIN CONFIRM (Security Gate) -->
+      <div class="os-view" id="view-admin" hidden>
+        <div class="view-header">
+          <span class="view-title">🔐 Admin Confirm</span>
+        </div>
+        <div class="admin-auth-box">
+          <div class="auth-icon">🛡️</div>
+          <div class="auth-prompt" id="admin-prompt">Enter Admin PIN or press OK to verify</div>
+          <div class="auth-pin-display" id="admin-pin-display">PIN: _</div>
+        </div>
+        <div class="view-nav-help">OK: Confirm · ESC: Cancel</div>
+      </div>
+
+      <!-- VIEW 3: MAIN MENU (K14 3x2 Firmware Grid) -->
+      <div class="os-view" id="view-menu" hidden>
+        <div class="view-header">
+          <span class="view-title">📁 Main Menu</span>
+          <span class="view-page" id="menu-page-indicator">[1/6]</span>
+        </div>
+        <div class="k14-menu-grid">
+          <div class="k14-tile active" data-index="1" id="tile-1">
+            <div class="tile-icon">👥</div>
+            <div class="tile-name">User Mgt</div>
+            <div class="tile-hotkey">1</div>
+          </div>
+          <div class="k14-tile" data-index="2" id="tile-2">
+            <div class="tile-icon">🌐</div>
+            <div class="tile-name">Comm.</div>
+            <div class="tile-hotkey">2</div>
+          </div>
+          <div class="k14-tile" data-index="3" id="tile-3">
+            <div class="tile-icon">⚙️</div>
+            <div class="tile-name">System</div>
+            <div class="tile-hotkey">3</div>
+          </div>
+          <div class="k14-tile" data-index="4" id="tile-4">
+            <div class="tile-icon">🎨</div>
+            <div class="tile-name">Personal</div>
+            <div class="tile-hotkey">4</div>
+          </div>
+          <div class="k14-tile" data-index="5" id="tile-5">
+            <div class="tile-icon">💾</div>
+            <div class="tile-name">Data Mgt</div>
+            <div class="tile-hotkey">5</div>
+          </div>
+          <div class="k14-tile" data-index="6" id="tile-6">
+            <div class="tile-icon">ℹ️</div>
+            <div class="tile-name">Sys Info</div>
+            <div class="tile-hotkey">6</div>
+          </div>
+        </div>
+        <div class="view-nav-help">▲▼◄►: Select · OK: Enter · ESC: Exit</div>
+      </div>
+
+      <!-- VIEW 4: USER MANAGEMENT (Synced with BITS employees) -->
+      <div class="os-view" id="view-users" hidden>
+        <div class="view-header">
+          <span class="view-title">👥 Enrolled Users</span>
+          <span class="view-page" id="users-count-badge">0</span>
+        </div>
+        <div class="users-list-wrap" id="users-list">
+          <div class="list-empty">Loading users...</div>
+        </div>
+        <div class="view-nav-help">▲▼: Scroll · ESC: Menu</div>
+      </div>
+
+      <!-- VIEW 5: COMMUNICATION SETTINGS (TCP Port 4370) -->
+      <div class="os-view" id="view-comm" hidden>
+        <div class="view-header">
+          <span class="view-title">🌐 Comm. Settings</span>
+        </div>
+        <div class="k14-info-table">
+          <div class="info-row"><span class="k">IP Address:</span><span class="v">127.0.0.1</span></div>
+          <div class="info-row"><span class="k">TCP Port:</span><span class="v text-accent font-mono">4370 (ACTIVE)</span></div>
+          <div class="info-row"><span class="k">Subnet Mask:</span><span class="v">255.255.255.0</span></div>
+          <div class="info-row"><span class="k">Gateway:</span><span class="v">127.0.0.1</span></div>
+          <div class="info-row"><span class="k">Device ID:</span><span class="v">1</span></div>
+          <div class="info-row"><span class="k">Comm Key:</span><span class="v">0</span></div>
+          <div class="info-row"><span class="k">BITS Polling:</span><span class="v text-pass">● Connected</span></div>
+        </div>
+        <div class="view-nav-help">ESC: Back to Menu</div>
+      </div>
+
+      <!-- VIEW 6: SYSTEM SETTINGS -->
+      <div class="os-view" id="view-system" hidden>
+        <div class="view-header">
+          <span class="view-title">⚙️ System Rules</span>
+        </div>
+        <div class="k14-info-table">
+          <div class="info-row"><span class="k">Clock Mode:</span><span class="v">24-Hour (BITS Sync)</span></div>
+          <div class="info-row"><span class="k">Dup. Punch:</span><span class="v text-pass">1 Min Filter</span></div>
+          <div class="info-row"><span class="k">Voice Prompt:</span><span class="v">Enabled (80% Vol)</span></div>
+          <div class="info-row"><span class="k">Auto State:</span><span class="v">Manual / Scheduled</span></div>
+          <div class="info-row"><span class="k">Match Mode:</span><span class="v text-accent">1:N Biometric</span></div>
+          <div class="info-row"><span class="k">OS Kernel:</span><span class="v font-mono">Linux 9.0.1 TFT</span></div>
+        </div>
+        <div class="view-nav-help">ESC: Back to Menu</div>
+      </div>
+
+      <!-- VIEW 7: PERSONALIZE -->
+      <div class="os-view" id="view-personal" hidden>
+        <div class="view-header">
+          <span class="view-title">🎨 Personalize</span>
+        </div>
+        <div class="k14-info-table">
+          <div class="info-row"><span class="k">Theme:</span><span class="v text-accent">ZKTeco Cobalt</span></div>
+          <div class="info-row"><span class="k">Key Beep:</span><span class="v text-pass">Enabled (1800Hz)</span></div>
+          <div class="info-row"><span class="k">Display Timeout:</span><span class="v">Always Active</span></div>
+          <div class="info-row"><span class="k">Bell Alarm:</span><span class="v">08:00, 12:00, 17:00</span></div>
+          <div class="info-row"><span class="k">Shortcut F1:</span><span class="v text-pass">Check-In</span></div>
+          <div class="info-row"><span class="k">Shortcut F2:</span><span class="v text-accent">Check-Out</span></div>
+        </div>
+        <div class="view-nav-help">ESC: Back to Menu</div>
+      </div>
+
+      <!-- VIEW 8: DATA MANAGEMENT (Punch Buffer & Storage) -->
+      <div class="os-view" id="view-data" hidden>
+        <div class="view-header">
+          <span class="view-title">💾 Attendance Buffer</span>
+          <span class="view-page" id="data-log-count">0 logs</span>
+        </div>
+        <div class="k14-log-buffer" id="k14-log-buffer">
+          <div class="list-empty">No punch records in buffer</div>
+        </div>
+        <div class="view-nav-help">ESC: Back to Menu</div>
+      </div>
+
+      <!-- VIEW 9: SYSTEM INFO (Firmware & Capacity) -->
+      <div class="os-view" id="view-sys" hidden>
+        <div class="view-header">
+          <span class="view-title">ℹ️ System Info</span>
+        </div>
+        <div class="k14-info-table">
+          <div class="info-row"><span class="k">Model:</span><span class="v">ZKTeco K14</span></div>
+          <div class="info-row"><span class="k">Algorithm:</span><span class="v">ZKFinger VX10.0</span></div>
+          <div class="info-row"><span class="k">Firmware:</span><span class="v font-mono">Ver 6.60 Nov 15 2021</span></div>
+          <div class="info-row"><span class="k">Serial No:</span><span class="v font-mono">BC98001249</span></div>
+          <div class="info-row"><span class="k">Platform:</span><span class="v">ZEM560_TFT</span></div>
+          <div class="info-row"><span class="k">User Cap:</span><span class="v" id="sys-cap-users">0 / 500</span></div>
+          <div class="info-row"><span class="k">Log Cap:</span><span class="v" id="sys-cap-logs">0 / 50,000</span></div>
+        </div>
+        <div class="view-nav-help">ESC: Back to Menu</div>
+      </div>
+
+      <!-- Authentic ZKTeco Verification Result Dialog (Pop-up Card) -->
+      <div class="verify-popup" id="verify-popup" hidden>
+        <div class="verify-modal-box" id="verify-box">
+          <div class="verify-badge-icon" id="verify-icon">✔</div>
+          <div class="verify-user-name" id="verify-name">—</div>
+          <div class="verify-details">
+            <div class="v-detail-row"><span>User ID:</span><strong id="verify-id">—</strong></div>
+            <div class="v-detail-row"><span>State:</span><span class="v-state-pill" id="verify-state">Check-In</span></div>
+            <div class="v-detail-row"><span>Time:</span><span id="verify-time">--:--:--</span></div>
+            <div class="v-detail-row v-math-row"><span>Calc Preview:</span><span class="v-math-pill" id="verify-math">On-Time</span></div>
+          </div>
+          <div class="verify-msg" id="verify-msg">Thank you!</div>
+        </div>
+      </div>
     </div>
 
-    <div class="verify pass" id="verify-pass" hidden>
-      <div class="mark">✔</div>
-      <div class="who" id="pass-name">—</div>
-      <div class="msg">Thank you!</div>
+    <!-- Enrolled User Selector Bar -->
+    <div class="user-select-bar">
+      <label for="select-user">Identity:</label>
+      <select id="select-user">
+        <option value="">Loading enrolled employees...</option>
+      </select>
     </div>
-    <div class="verify fail" id="verify-fail" hidden>
-      <div class="mark">✘</div>
-      <div class="who" id="fail-who">Unknown</div>
-      <div class="msg">Please try again</div>
+
+    <!-- Active Employee Shift Details Badge -->
+    <div class="user-shift-info" id="user-shift-info">
+      <span class="shift-badge-icon">📋</span>
+      <span class="shift-badge-text" id="user-shift-text">Shift: Morning (08:00 – 17:00 · Grace: 15m)</span>
     </div>
+
+    <!-- Keypad: 0-9 digits with direction indicators, Menu, Esc, OK, and SCAN -->
+    <div class="keypad">
+      <button type="button" class="key num" data-digit="1">1</button>
+      <button type="button" class="key num" data-digit="2" data-nav="up">2<span class="key-sub">▲</span></button>
+      <button type="button" class="key num" data-digit="3">3</button>
+      <button type="button" class="key fn" data-fn="menu">MENU</button>
+
+      <button type="button" class="key num" data-digit="4" data-nav="left">4<span class="key-sub">◄</span></button>
+      <button type="button" class="key num" data-digit="5">5</button>
+      <button type="button" class="key num" data-digit="6" data-nav="right">6<span class="key-sub">►</span></button>
+      <button type="button" class="key fn" data-fn="esc">ESC</button>
+
+      <button type="button" class="key num" data-digit="7">7</button>
+      <button type="button" class="key num" data-digit="8" data-nav="down">8<span class="key-sub">▼</span></button>
+      <button type="button" class="key num" data-digit="9">9</button>
+      <button type="button" class="key fn" data-fn="ok">OK</button>
+
+      <!-- Row 4: Dedicated '0' number key and 'SCAN' button -->
+      <button type="button" class="key num" data-digit="0" id="key-zero">0</button>
+      <button type="button" class="key fn fn-scan" id="key-scan">SCAN</button>
+    </div>
+
+    <div class="grille" aria-hidden="true"></div>
   </div>
 
-  <div class="keypad">
-    <button class="key num" data-digit="1">1</button>
-    <button class="key num" data-digit="2">2</button>
-    <button class="key num" data-digit="3">3</button>
-    <button class="key fn" data-fn="menu">MENU</button>
-    <button class="key num" data-digit="4">4</button>
-    <button class="key num" data-digit="5">5</button>
-    <button class="key num" data-digit="6">6</button>
-    <button class="key fn" data-fn="esc">ESC</button>
-    <button class="key num" data-digit="7">7</button>
-    <button class="key num" data-digit="8">8</button>
-    <button class="key num" data-digit="9">9</button>
-    <button class="key fn" data-fn="ok">OK</button>
-    <button class="key num" data-digit="0" id="key-scan">SCAN</button>
-  </div>
+  <!-- RIGHT: Shift Scenario Control Center & Terminal Console -->
+  <div class="right-panel-column">
+    <!-- SHIFT SCENARIO & TIME-TRAVEL CONTROLS -->
+    <div class="scenario-panel">
+      <div class="scenario-header">
+        <div class="scenario-title">
+          <span class="scenario-icon">⏱️</span>
+          <span>SHIFT MATH & TIME TRAVEL</span>
+        </div>
+        <div class="scenario-clock-status">
+          <span class="mode-pill mode-live" id="mode-pill">LIVE RTC</span>
+          <button type="button" class="btn-sync-live" id="btn-sync-live" title="Reset device clock to real system time">Sync Real-Time</button>
+        </div>
+      </div>
 
-  <div class="grille" aria-hidden="true"></div>
+      <!-- Quick Shift Scenarios Grid -->
+      <div class="scenario-section">
+        <div class="scenario-subhead">
+          <span>One-Click Shift Scenarios (Morning 08:00 – 17:00)</span>
+        </div>
+        <div class="scenario-grid">
+          <button type="button" class="scenario-btn btn-scen-ontime" data-time="07:55" data-state="0" title="Check-In 5m early · Status: Present, 0m Late">
+            <span class="scen-badge">IN</span>
+            <span class="scen-label">07:55 AM · On-Time In</span>
+            <span class="scen-desc">Present · 0m late</span>
+          </button>
+
+          <button type="button" class="scenario-btn btn-scen-grace" data-time="08:10" data-state="0" title="Check-In at 08:10 · Grace Applied, 0m Late">
+            <span class="scen-badge">IN</span>
+            <span class="scen-label">08:10 AM · Grace Period</span>
+            <span class="scen-desc">Grace Applied · 0m late</span>
+          </button>
+
+          <button type="button" class="scenario-btn btn-scen-late" data-time="08:35" data-state="0" title="Check-In at 08:35 · Status: Late by 20m">
+            <span class="scen-badge">IN</span>
+            <span class="scen-label">08:35 AM · Late In</span>
+            <span class="scen-desc">Late by 20 mins</span>
+          </button>
+
+          <button type="button" class="scenario-btn btn-scen-earlyout" data-time="15:30" data-state="1" title="Check-Out at 15:30 · Undertime: 90m">
+            <span class="scen-badge scen-badge-out">OUT</span>
+            <span class="scen-label">03:30 PM · Early Out</span>
+            <span class="scen-desc">Undertime by 90 mins</span>
+          </button>
+
+          <button type="button" class="scenario-btn btn-scen-ontimeout" data-time="17:05" data-state="1" title="Check-Out at 17:05 · Worked Hours: 8.00 hrs">
+            <span class="scen-badge scen-badge-out">OUT</span>
+            <span class="scen-label">05:05 PM · On-Time Out</span>
+            <span class="scen-desc">Shift Closed · 8.00 hrs</span>
+          </button>
+
+          <button type="button" class="scenario-btn btn-scen-ot" data-time="19:00" data-state="1" title="Check-Out at 19:00 · Post-Shift Overtime">
+            <span class="scen-badge scen-badge-ot">OT</span>
+            <span class="scen-label">07:00 PM · Overtime Out</span>
+            <span class="scen-desc">Shift End + OT eligible</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Custom Date & Time Travel -->
+      <div class="custom-time-section">
+        <div class="scenario-subhead">
+          <span>📅 Custom Time Travel & Buffer Controls</span>
+        </div>
+        <div class="custom-time-row">
+          <input type="date" id="custom-date" class="custom-input">
+          <input type="time" id="custom-time" class="custom-input" value="08:00">
+          <button type="button" id="btn-custom-punch" class="btn-custom-action" title="Travel to this exact time and record punch">Punch</button>
+          <button type="button" id="btn-custom-set-clock" class="btn-custom-secondary" title="Set device clock only without punching">Set Clock</button>
+          <button type="button" id="btn-clear-buffer" class="btn-custom-danger" title="Clear all punch logs in simulator memory">Clear Buffer</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TERMINAL WIRE PROTOCOL MONITOR -->
+    <div class="terminal-panel">
+      <div class="terminal-header">
+        <div class="terminal-title">
+          <span class="term-dot"></span>
+          <span>TERMINAL PROTOCOL MONITOR</span>
+        </div>
+        <div class="terminal-meta">
+          <span>TCP: <strong>4370</strong></span>
+          <span>HTTP: <strong>3030</strong></span>
+          <button type="button" class="terminal-btn" id="btn-clear-term">Clear</button>
+        </div>
+      </div>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
 </div>
 
-<div class="log" id="log"></div>
-
-<script src="/app.js"></script>
+<script src="/app.js?v=4"></script>
 </body>
 </html>

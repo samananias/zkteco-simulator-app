@@ -26,6 +26,9 @@ export interface SimulatorHandle {
   stop(): Promise<void>;
   tcpPort: number;
   httpPort: number;
+  store: Store;
+  engine: ProtocolEngine;
+  device: DeviceState;
 }
 
 function createStore(config: Config): Store {
@@ -62,9 +65,9 @@ export async function startSimulator(config: Config, logger: Logger = createLogg
   const engine = new ProtocolEngine({ config, store, device, bus, logger });
   await engine.start();
 
-  // Biometric subsystem (Phase 6, ADR-010/011) — optional at boot (NFR-12).
+  // Biometric subsystem (Phase 6, ADR-010/011) — disabled by default (NFR-12, M1-4).
   let biometric: BiometricService | undefined;
-  if (config.matcherUrl) {
+  if (config.biometricReal && config.matcherUrl) {
     const matcher = new MatcherClient(config.matcherUrl, logger);
     const key = config.biometricKey
       ? loadBiometricKey(config.biometricKey)
@@ -100,6 +103,9 @@ export async function startSimulator(config: Config, logger: Logger = createLogg
     bus,
     logger,
     biometric,
+    getFaults: () => engine.getFaults(),
+    setFault: (f) => engine.setFault(f),
+    clearFaults: () => engine.clearFaults(),
     reset: async () => {
       await store.clearAttendance();
       for (const t of await store.getTemplates()) await store.deleteTemplate(t.uid, t.finger);
@@ -131,6 +137,9 @@ export async function startSimulator(config: Config, logger: Logger = createLogg
   return {
     tcpPort: engine.tcpPort,
     httpPort: http.port,
+    store,
+    engine,
+    device,
     stop: async () => {
       if (retentionTimer) clearInterval(retentionTimer);
       await http.stop();
